@@ -16,6 +16,7 @@ class ROIDataset:
         dataset_path: str, 
         image_size: Tuple[int, int] = (640, 640),
         annotations_format: str = "yolo",
+        coco_json_path: Optional[str] = None,
         shuffle: bool = True,
         include_original: bool = True
     ):
@@ -26,14 +27,22 @@ class ROIDataset:
             dataset_path: Path to the dataset directory
             image_size: Size to resize images to (width, height)
             annotations_format: Format of annotations ('yolo', 'coco', etc.)
+            coco_json_path: Optional direct path to a COCO JSON file
             shuffle: Whether to shuffle the dataset
             include_original: Whether to keep original images in memory
         """
         self.dataset_path = Path(dataset_path)
         self.image_size = image_size
         self.annotations_format = annotations_format
+        self.coco_json_path = Path(coco_json_path) if coco_json_path else None
         self.shuffle = shuffle
         self.include_original = include_original
+        
+        # Load COCO annotations from a single file if provided
+        self.coco_data = None
+        self.coco_image_map = {}
+        if self.annotations_format == "coco" and self.coco_json_path:
+            self._load_coco_annotations()
         
         # Find all images and their corresponding labels
         self.samples = self._find_samples()
@@ -42,31 +51,68 @@ class ROIDataset:
             random.shuffle(self.samples)
             
         self.current_idx = 0
-        
+    
+    def _load_coco_annotations(self):
+        """Load COCO annotations from a single JSON file"""
+        try:
+            with open(self.coco_json_path, 'r') as f:
+                self.coco_data = json.load(f)
+            
+            # Create a mapping from image_id to image filename
+            image_id_to_filename = {}
+            for image in self.coco_data.get('images', []):
+                image_id_to_filename[image['id']] = image['file_name']
+            
+            # Create a mapping from image filename to annotations
+            for annotation in self.coco_data.get('annotations', []):
+                image_id = annotation['image_id']
+                if image_id in image_id_to_filename:
+                    filename = image_id_to_filename[image_id]
+                    if filename not in self.coco_image_map:
+                        self.coco_image_map[filename] = []
+                    self.coco_image_map[filename].append(annotation)
+            
+            print(f"Loaded {len(self.coco_image_map)} images with annotations from COCO JSON")
+        except Exception as e:
+            print(f"Error loading COCO JSON file {self.coco_json_path}: {e}")
+            self.coco_data = None
+            self.coco_image_map = {}
+            
     def _find_samples(self) -> List[Dict[str, Any]]:
         """Find all valid image-annotation pairs in the dataset directory"""
         samples = []
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
-        # import pdb; pdb.set_trace()
         
         for img_path in self.dataset_path.glob('**/*'):
             if img_path.suffix.lower() in image_extensions:
-                # Determine annotation path based on format
+                # Handle different annotation formats
+                ann_path = None
+                
                 if self.annotations_format == "yolo":
                     # YOLO format: same name but .txt extension in same folder
                     ann_path = img_path.with_suffix('.txt')
-                    # import pdb; pdb.set_trace()
                 elif self.annotations_format == "coco":
-                    # COCO format: JSON file in annotations subdirectory
-                    ann_path = self.dataset_path / "annotations" / f"{img_path.stem}.json"
+                    if self.coco_json_path:
+                        # We're using a central COCO JSON file
+                        # Check if this image has annotations in our loaded data
+                        filename = img_path.name
+                        if filename in self.coco_image_map:
+                            # Use the JSON path as a marker that we have annotations
+                            ann_path = self.coco_json_path
+                    else:
+                        # Individual JSON files in annotations subdirectory
+                        ann_path = self.dataset_path / "annotations" / f"{img_path.stem}.json"
                 else:
                     # Default to looking for same name with .txt extension
                     ann_path = img_path.with_suffix('.txt')
                 
-                if ann_path.exists():
+                # Only add as a sample if annotations exist
+                if ann_path and (ann_path.exists() or 
+                               (self.annotations_format == "coco" and self.coco_json_path)):
                     samples.append({
                         'image_path': str(img_path),
-                        'annotation_path': str(ann_path)
+                        'annotation_path': str(ann_path),
+                        'image_filename': img_path.name  # Store filename for COCO lookup
                     })
         
         print(f"Found {len(samples)} valid image-annotation pairs")
@@ -122,7 +168,8 @@ class ROIDataset:
             original_width, 
             original_height,
             width_scale,
-            height_scale
+            height_scale,
+            sample_info.get('image_filename')  # Pass filename for COCO lookup
         )
         
         result = {
@@ -145,7 +192,8 @@ class ROIDataset:
         original_width: int, 
         original_height: int,
         width_scale: float,
-        height_scale: float
+        height_scale: float,
+        image_filename: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Load annotations based on format and convert to standardized format.
@@ -188,12 +236,9 @@ class ROIDataset:
                 print(f"Error loading YOLO annotation {annotation_path}: {e}")
                 
         elif self.annotations_format == "coco":
-            # COCO format: JSON with bbox as [x, y, width, height]
-            try:
-                with open(annotation_path, 'r') as f:
-                    ann_data = json.load(f)
-                    
-                for ann in ann_data.get('annotations', []):
+            if self.coco_json_path and image_filename and image_filename in self.coco_image_map:
+                # Get annotations for this image from the loaded COCO data
+                for ann in self.coco_image_map[image_filename]:
                     if 'bbox' in ann and 'category_id' in ann:
                         # COCO format is [x, y, width, height] in absolute pixels
                         x, y, w, h = ann['bbox']
@@ -210,8 +255,31 @@ class ROIDataset:
                             'bbox': [x_scaled, y_scaled, w_scaled, h_scaled],  # in resized image
                             'score': ann.get('score', 1.0) if 'score' in ann else 1.0
                         })
-            except Exception as e:
-                print(f"Error loading COCO annotation {annotation_path}: {e}")
+            else:
+                # Traditional individual JSON files
+                try:
+                    with open(annotation_path, 'r') as f:
+                        ann_data = json.load(f)
+                        
+                    for ann in ann_data.get('annotations', []):
+                        if 'bbox' in ann and 'category_id' in ann:
+                            # COCO format is [x, y, width, height] in absolute pixels
+                            x, y, w, h = ann['bbox']
+                            
+                            # Scale to resized image
+                            x_scaled = x * width_scale
+                            y_scaled = y * height_scale
+                            w_scaled = w * width_scale
+                            h_scaled = h * height_scale
+                            
+                            annotations.append({
+                                'category_id': ann['category_id'],
+                                'bbox_orig': [x, y, w, h],  # in original image
+                                'bbox': [x_scaled, y_scaled, w_scaled, h_scaled],  # in resized image
+                                'score': ann.get('score', 1.0) if 'score' in ann else 1.0
+                            })
+                except Exception as e:
+                    print(f"Error loading individual COCO annotation {annotation_path}: {e}")
         
         return annotations
     

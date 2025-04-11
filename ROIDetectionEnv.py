@@ -48,7 +48,7 @@ class ROIDetectionEnv(gym.Env):
         self.current_image = self.current_sample['resized_image']
         
         # Run YOLO on the full resized image to get baseline accuracy
-        self.full_image_results = self.detector(self.current_image)
+        self.full_image_results = self.detector(self.current_image, verbose=False)
         
         # Reset bounding boxes
         self.bboxes = []
@@ -217,7 +217,7 @@ class ROIDetectionEnv(gym.Env):
             return {'full': full_image_metrics, 'roi': {}}, -10.0  # Invalid ROIs
             
         # Run YOLO on all ROIs
-        roi_results = [self.detector(roi) for roi in roi_images]
+        roi_results = [self.detector(roi, verbose=False) for roi in roi_images]
         
         # Calculate average metrics across all ROIs
         roi_metrics_list = [self._get_detection_metrics(result) for result in roi_results]
