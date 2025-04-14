@@ -297,30 +297,34 @@ class ROIDetectionEnv(gym.Env):
         precision_diff = roi_metrics.get('precision', 0.0) - full_metrics.get('precision', 0.0)
         recall_diff = roi_metrics.get('recall', 0.0) - full_metrics.get('recall', 0.0)
         map_diff = roi_metrics.get('map50', 0.0) - full_metrics.get('map50', 0.0)
+
+        # Average improvement (core reward)
+        metrics_avg_diff = (precision_diff + recall_diff + map_diff) / 3.0
+
+        # Penalize completely empty detections
+        if roi_metrics.get('precision', 0.0) == 0.0 and roi_metrics.get('recall', 0.0):
+            return -5.0, metrics
         
-        # Coverage reward: proportion of the image covered by ROIs
+        # Efficiency
         total_roi_area = sum(bbox[2] * bbox[3] for bbox in self.bboxes)
         image_area = self.image_size[0] * self.image_size[1]
         coverage_ratio = min(1.0, total_roi_area / image_area)
-        
-        # Efficiency reward: higher if we achieve similar or better results with less coverage
         efficiency_factor = max(0.1, (1.0 - coverage_ratio) * 2)
+
         
-        # Combine metrics into final reward
-        # Weighted combination of metric differences and efficiency
-        metric_weight = 5.0
-        efficiency_weight = 10.0
+        # Weights
+        metric_weight = 7.0      # Stronger focus on quality
+        efficiency_weight = 3.0  # Still encourage small area
+        roi_penalty = -0.5 * max(0, len(self.bboxes) - 5)
         
-        # The core reward is based on the average improvement across metrics
-        metrics_avg_diff = (precision_diff + recall_diff + map_diff) / 3.0
-        
-        # Penalize excessive ROIs - we want minimal ROIs that capture key information
-        roi_penalty = -0.2 * max(0, len(self.bboxes) - 5)
-        
-        final_reward = (metrics_avg_diff * metric_weight) + (efficiency_factor * efficiency_weight) + roi_penalty
-        
+        final_reward = (
+        (metrics_avg_diff * metric_weight) +
+        (efficiency_factor * efficiency_weight) +
+        roi_penalty
+        )
+
         return final_reward, metrics
-    
+        
     def _get_bbox_size(self):
         """
         Calculate the bbox size (width, height) in the resized image
