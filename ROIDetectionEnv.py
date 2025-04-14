@@ -5,7 +5,7 @@ import cv2
 from ultralytics import YOLO
 
 class ROIDetectionEnv(gym.Env):
-    def __init__(self, dataset, bbox_size=(32, 32), yolo_model_path='yolov8n.pt'):
+    def __init__(self, dataset, crop_size=(640,640), yolo_model_path='yolov8n.pt'):
         """
         Initialize the ROI Detection Environment.
         
@@ -18,8 +18,9 @@ class ROIDetectionEnv(gym.Env):
         
         self.dataset = dataset
         self.image_size = dataset.image_size
-        self.bbox_size = bbox_size
         self.current_sample = None
+        self.crop_size= crop_size
+        self.bbox_size = None
         self.bboxes = []
         
         # Define action space:
@@ -43,23 +44,32 @@ class ROIDetectionEnv(gym.Env):
 
     def reset(self):
         """Reset the environment with a new image"""
-        # Get next sample from dataset
-        self.current_sample = next(self.dataset)
+        try:
+            self.current_sample = next(self.dataset)
+        except StopIteration:
+            # Dataset exhausted — restart it
+            self.dataset.__iter__()  # Resets index and optionally reshuffles
+            self.current_sample = next(self.dataset)
+
         self.current_image = self.current_sample['resized_image']
-        
-        # Run YOLO on the full resized image to get baseline accuracy
+
+        # Run YOLO on full image
         self.full_image_results = self.detector(self.current_image, verbose=False)
-        
-        # Reset bounding boxes
+
+        # Reset bboxes
         self.bboxes = []
+
         
-        # Initial bbox position: center of the image
+        # Calculate visual bbox size for the resized image
+        self.bbox_size = self._get_bbox_size()
+
+        # Initial bbox center
         self.current_bbox = [
             (self.image_size[0] - self.bbox_size[0]) // 2,
             (self.image_size[1] - self.bbox_size[1]) // 2,
             self.bbox_size[0], self.bbox_size[1]
         ]
-        
+
         return self._get_observation()
 
     def step(self, action):
@@ -310,6 +320,15 @@ class ROIDetectionEnv(gym.Env):
         final_reward = (metrics_avg_diff * metric_weight) + (efficiency_factor * efficiency_weight) + roi_penalty
         
         return final_reward, metrics
+    
+    def _get_bbox_size(self):
+        """
+        Calculate the bbox size (width, height) in the resized image
+        that corresponds to crop_size in the original image.
+        """
+        scale_w, scale_h = self.current_sample['scale_factors']
+        crop_w, crop_h = self.crop_size
+        return int(crop_w * scale_w), int(crop_h * scale_h)
 
     def render(self, mode='rgb_array'):
         """Render the current state of the environment"""

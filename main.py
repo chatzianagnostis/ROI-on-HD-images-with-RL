@@ -9,7 +9,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 # Import required classes
 from ROIDataset import ROIDataset
 from ROIDetectionEnv import ROIDetectionEnv
-from agent import SimpleROIAgent
+from agent import ROIAgent
 
 def main():
     print("ROI Detection Agent - Training")
@@ -39,14 +39,14 @@ def main():
     # Create environment
     env = ROIDetectionEnv(
         dataset=dataset,
-        bbox_size=(64, 64),
+        crop_size=(640, 640),
         yolo_model_path="yolov8n.pt"
     )
     
     print(f"Environment ready - dataset has {len(dataset)} samples")
     
     # 2. Create and train agent
-    agent = SimpleROIAgent(
+    agent = ROIAgent(
         env=env,
         model_dir="models",
         log_dir="logs"
@@ -54,10 +54,10 @@ def main():
     
     # Create a CheckpointCallback to save every 10,000 timesteps
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000,  # Save every 10,000 steps
+        save_freq=15000,  # Save every 10,000 steps
         save_path="models/checkpoints/",
         name_prefix="roi_model",
-        verbose=1
+        verbose=2
     )
     
     # Train and save model
@@ -65,7 +65,7 @@ def main():
     start_time = time.time()
     
     # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=25000, callback=checkpoint_callback)
+    agent.train(total_timesteps=1000000, callback=checkpoint_callback)
     
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")

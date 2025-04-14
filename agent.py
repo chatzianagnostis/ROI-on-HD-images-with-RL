@@ -85,7 +85,7 @@ class ROIDetectionPolicy(ActorCriticPolicy):
             **kwargs
         )
             
-class SimpleROIAgent:
+class ROIAgent:
     """Agent for ROI Detection using PPO"""
     def __init__(
         self,
@@ -105,13 +105,14 @@ class SimpleROIAgent:
             policy=ActorCriticPolicy,
             env=env,
             learning_rate=learning_rate,
-            n_steps=128,
+            n_steps=512,
             batch_size=64,
             n_epochs=10,
             gamma=0.99,
             gae_lambda=0.95,
+            ent_coef=0.01,
             clip_range=0.2,
-            verbose=1,
+            verbose=2,
             tensorboard_log=tensorboard_log,
             policy_kwargs={
                 "features_extractor_class": ROIFeatureExtractor,
@@ -126,7 +127,7 @@ class SimpleROIAgent:
         self.model_dir = model_dir
         self.log_dir = log_dir
 
-    def train(self, total_timesteps=100_000, callback=None):
+    def train(self, total_timesteps=1_000_000, callback=None):
         """
         Train the agent
         
