@@ -1,6 +1,3 @@
-"""
-ROI Detection Training Script
-"""
 import os
 import time
 import torch
