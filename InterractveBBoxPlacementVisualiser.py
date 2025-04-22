@@ -1,5 +1,5 @@
 """
-ROI Detection Environment Tester - A script to verify the ROIDetectionEnv works correctly
+ROI Detection Environment Tester - A script to verify the K-means based ROIDetectionEnv works correctly
 """
 import os
 import cv2
@@ -13,7 +13,7 @@ from ROIDataset import ROIDataset
 from ROIDetectionEnv import ROIDetectionEnv
 
 class ROIEnvTester:
-    def __init__(self, dataset_path, coco_json_path, crop_size=(640, 640), yolo_model_path="yolov8n.pt"):
+    def __init__(self, dataset_path, coco_json_path, crop_size=(640, 640)):
         """
         Initialize the environment tester
         
@@ -21,7 +21,6 @@ class ROIEnvTester:
             dataset_path: Path to the dataset directory
             coco_json_path: Path to the COCO annotations
             crop_size: Size of the crop window (width, height)
-            yolo_model_path: Path to the YOLO model
         """
         # Create output directory
         self.output_dir = Path("env_test_results")
@@ -38,11 +37,10 @@ class ROIEnvTester:
         )
         
         # Initialize the environment
-        print("Setting up environment...")
+        print("Setting up environment with K-means based ROI optimization...")
         self.env = ROIDetectionEnv(
             dataset=self.dataset,
             crop_size=crop_size,
-            yolo_model_path=yolo_model_path,
             time_limit=300  # Longer time limit for testing
         )
         
@@ -71,14 +69,27 @@ class ROIEnvTester:
         print("  R: Remove last bounding box")
         print("  E: End episode")
         print("  Q: Quit")
+        print("  K: Show optimal ROIs from K-means (toggle visibility)")
         
         # Reset environment
         obs = self.env.reset()
         done = False
         total_reward = 0
         
+        # Toggle for showing optimal ROIs
+        show_optimal = True
+        
         # Convert dict observation to image for display
         frame = obs['image']
+        
+        # Draw optimal ROIs if available
+        if show_optimal and self.env.optimal_rois:
+            for roi in self.env.optimal_rois:
+                cv2.rectangle(frame, 
+                             (int(roi[0]), int(roi[1])), 
+                             (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                             (0, 0, 255), 1)  # Red color for optimal ROIs
+                             
         cv2.imshow(self.window_name, frame)
         
         while not done:
@@ -101,6 +112,17 @@ class ROIEnvTester:
                 action = 5  # Remove bbox
             elif key == ord('e'):  # E
                 action = 6  # End episode
+            elif key == ord('k'):  # K - toggle optimal ROIs
+                show_optimal = not show_optimal
+                frame = self.env.render(mode='rgb_array')
+                if show_optimal and self.env.optimal_rois:
+                    for roi in self.env.optimal_rois:
+                        cv2.rectangle(frame, 
+                                     (int(roi[0]), int(roi[1])), 
+                                     (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                                     (0, 0, 255), 1)  # Red color for optimal ROIs
+                cv2.imshow(self.window_name, frame)
+                continue
             elif key == ord('q'):  # Q
                 break
                 
@@ -124,6 +146,13 @@ class ROIEnvTester:
                 # Render the environment
                 frame = self.env.render(mode='rgb_array')
                 if frame is not None:
+                    # Only draw optimal ROIs if toggled on
+                    if show_optimal and self.env.optimal_rois:
+                        for roi in self.env.optimal_rois:
+                            cv2.rectangle(frame, 
+                                         (int(roi[0]), int(roi[1])), 
+                                         (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                                         (0, 0, 255), 1)  # Red color for optimal ROIs
                     cv2.imshow(self.window_name, frame)
                 
                 # Check if episode ended
@@ -134,16 +163,18 @@ class ROIEnvTester:
                         metrics = info['metrics']
                         print("\nFinal Metrics:")
                         
-                        if 'full' in metrics and 'roi' in metrics:
-                            full = metrics['full']
-                            roi = metrics['roi']
-                            print(f"  Full image - Precision: {full.get('precision', 0):.4f}, " +
-                                f"Recall: {full.get('recall', 0):.4f}, mAP50: {full.get('map50', 0):.4f}")
-                            print(f"  ROI only   - Precision: {roi.get('precision', 0):.4f}, " +
-                                f"Recall: {roi.get('recall', 0):.4f}, mAP50: {roi.get('map50', 0):.4f}")
-                        
-                        if 'coverage' in metrics:
-                            print(f"  Image coverage: {metrics['coverage']:.2%}")
+                        # Print metrics for K-means approach
+                        if 'coverage_score' in metrics:
+                            print(f"  Coverage score: {metrics['coverage_score']:.4f}")
+                        if 'roi_matching_score' in metrics:
+                            print(f"  ROI matching score: {metrics['roi_matching_score']:.4f}")
+                        if 'efficiency_score' in metrics:
+                            print(f"  Efficiency score: {metrics['efficiency_score']:.4f}")
+                        if 'overlap_penalty' in metrics:
+                            print(f"  Overlap penalty: {metrics['overlap_penalty']:.4f}")
+                        if 'optimal_count' in metrics and 'placed_count' in metrics:
+                            print(f"  Optimal ROI count: {metrics['optimal_count']}")
+                            print(f"  Placed ROI count: {metrics['placed_count']}")
                         
                         if 'time' in metrics:
                             time_info = metrics['time']
@@ -177,6 +208,13 @@ class ROIEnvTester:
         
         if render:
             frame = self.env.render(mode='rgb_array')
+            # Display optimal ROIs from K-means
+            if self.env.optimal_rois:
+                for roi in self.env.optimal_rois:
+                    cv2.rectangle(frame, 
+                                 (int(roi[0]), int(roi[1])), 
+                                 (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                                 (0, 0, 255), 1)  # Red color for optimal ROIs
             if frame is not None:
                 cv2.imshow(self.window_name, frame)
         
@@ -204,6 +242,13 @@ class ROIEnvTester:
             # Render if requested
             if render:
                 frame = self.env.render(mode='rgb_array')
+                # Show optimal ROIs
+                if self.env.optimal_rois:
+                    for roi in self.env.optimal_rois:
+                        cv2.rectangle(frame, 
+                                     (int(roi[0]), int(roi[1])), 
+                                     (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                                     (0, 0, 255), 1)  # Red color for optimal ROIs
                 if frame is not None:
                     cv2.imshow(self.window_name, frame)
                     cv2.waitKey(1)  # Small delay
@@ -216,16 +261,18 @@ class ROIEnvTester:
             metrics = info['metrics']
             print("\nFinal Metrics:")
             
-            if 'full' in metrics and 'roi' in metrics:
-                full = metrics['full']
-                roi = metrics['roi']
-                print(f"  Full image - Precision: {full.get('precision', 0):.4f}, " +
-                    f"Recall: {full.get('recall', 0):.4f}, mAP50: {full.get('map50', 0):.4f}")
-                print(f"  ROI only   - Precision: {roi.get('precision', 0):.4f}, " +
-                    f"Recall: {roi.get('recall', 0):.4f}, mAP50: {roi.get('map50', 0):.4f}")
-            
-            if 'coverage' in metrics:
-                print(f"  Image coverage: {metrics['coverage']:.2%}")
+            # Print metrics for K-means approach
+            if 'coverage_score' in metrics:
+                print(f"  Coverage score: {metrics['coverage_score']:.4f}")
+            if 'roi_matching_score' in metrics:
+                print(f"  ROI matching score: {metrics['roi_matching_score']:.4f}")
+            if 'efficiency_score' in metrics:
+                print(f"  Efficiency score: {metrics['efficiency_score']:.4f}")
+            if 'overlap_penalty' in metrics:
+                print(f"  Overlap penalty: {metrics['overlap_penalty']:.4f}")
+            if 'optimal_count' in metrics and 'placed_count' in metrics:
+                print(f"  Optimal ROI count: {metrics['optimal_count']}")
+                print(f"  Placed ROI count: {metrics['placed_count']}")
             
             if 'time' in metrics:
                 time_info = metrics['time']
@@ -275,7 +322,7 @@ class ROIEnvTester:
                 print(f"  {name}: N/A")
 
 def main():
-    parser = argparse.ArgumentParser(description="ROI Detection Environment Tester")
+    parser = argparse.ArgumentParser(description="ROI Detection Environment Tester (K-means Version)")
     parser.add_argument("--dataset", type=str, required=True,
                       help="Path to the dataset directory")
     parser.add_argument("--annotations", type=str, required=True,
@@ -284,8 +331,6 @@ def main():
                       help="Width of the crop window (default: 640)")
     parser.add_argument("--crop_height", type=int, default=640,
                       help="Height of the crop window (default: 640)")
-    parser.add_argument("--yolo_model", type=str, default="yolov8n.pt",
-                      help="Path to YOLO model (default: yolov8n.pt)")
     parser.add_argument("--mode", type=str, choices=['manual', 'random', 'both'], default='manual',
                       help="Test mode: manual, random, or both (default: manual)")
     
@@ -294,8 +339,7 @@ def main():
     tester = ROIEnvTester(
         dataset_path=args.dataset,
         coco_json_path=args.annotations,
-        crop_size=(args.crop_width, args.crop_height),
-        yolo_model_path=args.yolo_model
+        crop_size=(args.crop_width, args.crop_height)
     )
     
     if args.mode == 'manual' or args.mode == 'both':

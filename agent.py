@@ -60,31 +60,6 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         combined = torch.cat([image_features, bbox_features], dim=1)
         return self.combined_layer(combined)
 
-class ROIDetectionPolicy(ActorCriticPolicy):
-    """
-    Custom policy for the ROI Detection environment.
-    Extends the ActorCriticPolicy from Stable Baselines3.
-    """
-    def __init__(
-        self,
-        observation_space: spaces.Dict,
-        action_space: spaces.Discrete,
-        lr_schedule,
-        *args,
-        **kwargs
-    ):
-        """Initialize the custom policy"""
-        # Use our custom feature extractor
-        kwargs["features_extractor_class"] = ROIFeatureExtractor
-        kwargs["features_extractor_kwargs"] = dict(features_dim=512)
-        super(ROIDetectionPolicy, self).__init__(
-            observation_space,
-            action_space,
-            lr_schedule,
-            *args,
-            **kwargs
-        )
-            
 class ROIAgent:
     """Agent for ROI Detection using PPO"""
     def __init__(
@@ -100,7 +75,7 @@ class ROIAgent:
         os.makedirs(log_dir, exist_ok=True)
         os.makedirs(tensorboard_log, exist_ok=True)
 
-        # PPO hyperparameters
+        # PPO hyperparameters - optimized for K-means based environment
         ppo_params = dict(
             policy=ActorCriticPolicy,
             env=env,
@@ -137,11 +112,11 @@ class ROIAgent:
         """
         self.model.learn(total_timesteps=total_timesteps, callback=callback)
 
-    def save_model(self, name="roi_agent"):
+    def save_model(self, name="roi_kmeans_agent"):
         path = os.path.join(self.model_dir, name)
         self.model.save(path)
 
-    def load_model(self, name="roi_agent"):
+    def load_model(self, name="roi_kmeans_agent"):
         path = os.path.join(self.model_dir, name)
         self.model = PPO.load(path, env=self.env)
         

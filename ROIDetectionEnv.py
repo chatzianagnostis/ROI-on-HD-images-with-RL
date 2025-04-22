@@ -2,26 +2,28 @@ import numpy as np
 import gym
 from gym import spaces
 import cv2
-from ultralytics import YOLO
+from sklearn.cluster import KMeans
 
 class ROIDetectionEnv(gym.Env):
-    def __init__(self, dataset, crop_size=(640,640), yolo_model_path='yolov8n.pt'):
+    def __init__(self, dataset, crop_size=(640,640), time_limit=120):
         """
         Initialize the ROI Detection Environment.
         
         Args:
             dataset: ROIDataset instance for loading images and annotations
-            bbox_size: Size of the bounding boxes to place (width, height)
-            yolo_model_path: Path to the YOLO model
+            crop_size: Size of the ROIs to place (width, height)
+            time_limit: Time limit for an episode in seconds
         """
         super(ROIDetectionEnv, self).__init__()
         
         self.dataset = dataset
         self.image_size = dataset.image_size
         self.current_sample = None
-        self.crop_size= crop_size
+        self.crop_size = crop_size
         self.bbox_size = None
         self.bboxes = []
+        self.time_limit = time_limit
+        self.start_time = None
         
         # Define action space:
         # 0-3: Move bbox (up, down, left, right)
@@ -29,9 +31,6 @@ class ROIDetectionEnv(gym.Env):
         # 5: Remove bbox
         # 6: End episode
         self.action_space = spaces.Discrete(7)
-
-        # Load YOLO
-        self.detector = YOLO(yolo_model_path)
         
         # Observation space: image and current bbox state
         self.observation_space = spaces.Dict({
@@ -39,11 +38,14 @@ class ROIDetectionEnv(gym.Env):
             'bbox_state': spaces.Box(low=0, high=1, shape=(100, 4), dtype=np.float32)  # max 100 bboxes
         })
 
-        # Store full image detection results
-        self.full_image_results = None
+        # Store optimal ROIs
+        self.optimal_rois = None
 
     def reset(self):
         """Reset the environment with a new image"""
+        import time
+        self.start_time = time.time()
+        
         try:
             self.current_sample = next(self.dataset)
         except StopIteration:
@@ -53,15 +55,14 @@ class ROIDetectionEnv(gym.Env):
 
         self.current_image = self.current_sample['resized_image']
 
-        # Run YOLO on full image
-        self.full_image_results = self.detector(self.current_image, verbose=False)
+        # Calculate visual bbox size for the resized image
+        self.bbox_size = self._get_bbox_size()
+        
+        # Calculate optimal ROIs using K-means
+        self.optimal_rois = self._calculate_optimal_rois()
 
         # Reset bboxes
         self.bboxes = []
-
-        
-        # Calculate visual bbox size for the resized image
-        self.bbox_size = self._get_bbox_size()
 
         # Initial bbox center
         self.current_bbox = [
@@ -74,9 +75,23 @@ class ROIDetectionEnv(gym.Env):
 
     def step(self, action):
         """Take a step in the environment based on the action"""
+        import time
+        
         reward = 0
         done = False
         info = {}
+        
+        # Check if time limit exceeded
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time > self.time_limit:
+            done = True
+            reward, metrics = self._calculate_final_reward()
+            metrics['time'] = {
+                'elapsed': elapsed_time,
+                'limit': self.time_limit
+            }
+            info['metrics'] = metrics
+            return self._get_observation(), reward, done, info
         
         if action < 4:  # Move bbox
             self._move_bbox(action)
@@ -87,6 +102,10 @@ class ROIDetectionEnv(gym.Env):
         else:  # End episode
             done = True
             reward, metrics = self._calculate_final_reward()
+            metrics['time'] = {
+                'elapsed': elapsed_time,
+                'limit': self.time_limit
+            }
             info['metrics'] = metrics
         
         return self._get_observation(), reward, done, info
@@ -192,137 +211,208 @@ class ROIDetectionEnv(gym.Env):
         ]
         return original_bbox
 
-    def _evaluate_roi(self):
-        """Evaluate the ROIs by comparing YOLO detection on ROIs vs full image"""
-        if not self.bboxes:
-            return {'full': {}, 'roi': {}}, 0.0  # No ROIs to evaluate
+    def _calculate_optimal_rois(self):
+        """
+        KMeans-based ROI discovery under L∞ constraint.
+        
+        Returns: list of [x0, y0, roi_w, roi_h]
+        """
+        annotations = self.current_sample['annotations']
+        H, W = self.current_image.shape[:2]
+        roi_w, roi_h = self.bbox_size
+        half_w, half_h = roi_w/2.0, roi_h/2.0
+        
+        # Helper to clamp center so ROI stays in image
+        def clamp(val, lo, hi):
+            return max(lo, min(val, hi))
             
-        # Get detection results from the full image
-        full_image_metrics = self._get_detection_metrics(self.full_image_results)
+        # 1) collect annotation centers
+        pts = []
+        for ann in annotations:
+            x, y, w, h = ann['bbox']
+            pts.append((x + w/2.0, y + h/2.0))
         
-        # Process each ROI
-        roi_images = []
-        original_rois = []
-        
-        original_image = self.current_sample['original_image']
-        
-        for bbox in self.bboxes:
-            # Scale bbox to original image dimensions
-            original_bbox = self._scale_bbox_to_original(bbox)
-            original_rois.append(original_bbox)
-            
-            # Extract ROI from original image
-            x, y, w, h = original_bbox
-            # Ensure we don't go out of bounds
-            x = max(0, x)
-            y = max(0, y)
-            w = min(w, original_image.shape[1] - x)
-            h = min(h, original_image.shape[0] - y)
-            
-            roi = original_image[y:y+h, x:x+w]
-            if roi.size > 0:  # Only append valid ROIs
-                roi_images.append(roi)
-        
-        if not roi_images:
-            return {'full': full_image_metrics, 'roi': {}}, -10.0  # Invalid ROIs
-            
-        # Run YOLO on all ROIs
-        roi_results = [self.detector(roi, verbose=False) for roi in roi_images]
-        
-        # Calculate average metrics across all ROIs
-        roi_metrics_list = [self._get_detection_metrics(result) for result in roi_results]
-        avg_roi_metrics = {
-            'precision': np.mean([m.get('precision', 0.0) for m in roi_metrics_list]),
-            'recall': np.mean([m.get('recall', 0.0) for m in roi_metrics_list]),
-            'map50': np.mean([m.get('map50', 0.0) for m in roi_metrics_list]),
-        }
-        
-        # Combine metrics into a dictionary to return
-        metrics = {
-            'full': full_image_metrics,
-            'roi': avg_roi_metrics,
-            'roi_count': len(self.bboxes),
-            'coverage': sum(bbox[2] * bbox[3] for bbox in self.bboxes) / (self.image_size[0] * self.image_size[1])
-        }
-        
-        return metrics, avg_roi_metrics
-
-    def _get_detection_metrics(self, results):
-        """Extract precision, recall, mAP50 from YOLO results"""
-        # Note: This is a simplified version, as actual metrics calculation
-        # depends on the specific YOLO implementation
-        if not results or len(results) == 0:
-            return {'precision': 0.0, 'recall': 0.0, 'map50': 0.0}
-            
-        metrics = {}
-        
-        try:
-            # Try to extract metrics from the results
-            # Different YOLO versions might have different ways to access metrics
-            if hasattr(results[0], 'box') and hasattr(results[0].box, 'metrics'):
-                box_metrics = results[0].box.metrics
-                metrics = {
-                    'precision': box_metrics.get('precision', 0.0),
-                    'recall': box_metrics.get('recall', 0.0),
-                    'map50': box_metrics.get('map50', 0.0),
-                }
+        # If no annotations or just one, return a single centered ROI
+        if len(pts) <= 1:
+            if len(pts) == 1:
+                cx, cy = pts[0]
+                cx = clamp(cx, half_w, W - half_w)
+                cy = clamp(cy, half_h, H - half_h)
             else:
-                # Alternative way to estimate metrics based on detections
-                boxes = results[0].boxes
-                if boxes is not None and len(boxes) > 0:
-                    # Simplified metrics based on detection count and confidence
-                    confidence_scores = boxes.conf.cpu().numpy() if hasattr(boxes, 'conf') else []
-                    metrics = {
-                        'precision': np.mean(confidence_scores) if len(confidence_scores) > 0 else 0.0,
-                        'recall': min(1.0, len(boxes) / 10),  # Simplified recall estimate
-                        'map50': np.mean(confidence_scores) if len(confidence_scores) > 0 else 0.0,
-                    }
-        except Exception as e:
-            print(f"Error extracting metrics from YOLO results: {e}")
-            metrics = {'precision': 0.0, 'recall': 0.0, 'map50': 0.0}
+                cx, cy = W/2, H/2
+            return [[cx - half_w, cy - half_h, roi_w, roi_h]]
             
-        return metrics
+        # Convert to numpy array for KMeans
+        pts = np.array(pts)
+        
+        # 2) search for minimal k
+        best_k = len(pts)
+        best_centers = None
+        
+        for k in range(1, len(pts)+1):
+            # Skip if we have too few points for k clusters
+            if len(pts) < k:
+                continue
+                
+            # Fit KMeans
+            km = KMeans(n_clusters=k, random_state=0).fit(pts)
+            centers = km.cluster_centers_
+            labels = km.labels_
+            
+            good = True
+            # for each cluster, check L∞ radius
+            for ci in range(k):
+                cx, cy = centers[ci]
+                # all pts in this cluster
+                members = [pts[i] for i, lab in enumerate(labels) if lab == ci]
+                if not members:  # Skip empty clusters
+                    continue
+                # max |Δx|, |Δy|
+                max_dx = max(abs(px - cx) for px, py in members)
+                max_dy = max(abs(py - cy) for px, py in members)
+                if max_dx > half_w or max_dy > half_h:
+                    good = False
+                    break
+            
+            if good:
+                best_k = k
+                best_centers = centers
+                break
+        
+        # 3) build ROIs around those cluster-centers
+        rois = []
+        for (cx, cy) in best_centers:
+            # clamp inside image
+            cx = clamp(cx, half_w, W - half_w)
+            cy = clamp(cy, half_h, H - half_h)
+            x0, y0 = cx - half_w, cy - half_h
+            rois.append([x0, y0, roi_w, roi_h])
+        
+        return rois
+
+    def _is_bbox_contained(self, bbox1, bbox2, threshold=0.8):
+        """Check if bbox1 is mostly contained within bbox2"""
+        # Convert to [x1, y1, x2, y2] format
+        bbox1_x1, bbox1_y1 = bbox1[0], bbox1[1]
+        bbox1_x2, bbox1_y2 = bbox1[0] + bbox1[2], bbox1[1] + bbox1[3]
+        
+        bbox2_x1, bbox2_y1 = bbox2[0], bbox2[1]
+        bbox2_x2, bbox2_y2 = bbox2[0] + bbox2[2], bbox2[1] + bbox2[3]
+        
+        # Calculate intersection area
+        x_left = max(bbox1_x1, bbox2_x1)
+        y_top = max(bbox1_y1, bbox2_y1)
+        x_right = min(bbox1_x2, bbox2_x2)
+        y_bottom = min(bbox1_y2, bbox2_y2)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return False
+                
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        bbox1_area = (bbox1_x2 - bbox1_x1) * (bbox1_y2 - bbox1_y1)
+        
+        # Return true if intersection covers at least threshold of bbox1
+        return intersection_area / bbox1_area >= threshold
+
+    def _calculate_annotation_coverage(self, rois, annotations):
+        """Calculate how many annotations are properly covered by at least one ROI"""
+        covered_count = 0
+        total_annotations = len(annotations)
+        
+        if total_annotations == 0:
+            return 1.0  # Perfect coverage if no annotations
+        
+        for ann in annotations:
+            ann_bbox = ann['bbox']  # [x, y, w, h]
+            # Check if this annotation is covered by any ROI
+            for roi in rois:
+                if self._is_bbox_contained(ann_bbox, roi):
+                    covered_count += 1
+                    break
+        
+        return covered_count / total_annotations
+
+    def _calculate_roi_matching(self, placed_rois, optimal_rois):
+        """Calculate how well placed ROIs match optimal ROIs using IoU"""
+        if not optimal_rois or not placed_rois:
+            return 0.0
+        
+        # For each optimal ROI, find best matching placed ROI
+        total_iou = 0.0
+        
+        for opt_roi in optimal_rois:
+            best_iou = 0.0
+            for placed_roi in placed_rois:
+                iou = self._calculate_iou(opt_roi, placed_roi)
+                best_iou = max(best_iou, iou)
+            total_iou += best_iou
+        
+        # Average IoU across all optimal ROIs
+        return total_iou / len(optimal_rois)
+
+    def _calculate_roi_overlap_penalty(self, rois):
+        """Calculate penalty for excessive overlap between ROIs"""
+        if len(rois) <= 1:
+            return 0.0
+        
+        total_penalty = 0.0
+        for i in range(len(rois)):
+            for j in range(i+1, len(rois)):
+                iou = self._calculate_iou(rois[i], rois[j])
+                # Only penalize IoU above 0.3
+                if iou > 0.3:
+                    total_penalty += (iou - 0.3)
+        
+        return min(1.0, total_penalty)  # Cap penalty at 1.0
 
     def _calculate_final_reward(self):
-        """Calculate final reward based on the difference between ROI accuracy and full image accuracy"""
-        metrics, roi_metrics = self._evaluate_roi()
-        
+        """Calculate final reward based on optimal ROIs and annotation coverage"""
         if not self.bboxes:
-            return -10.0, metrics  # Large penalty for not placing any ROIs
+            return -10.0, {"metrics": "No ROIs placed"}  # Large penalty for not placing any ROIs
         
-        # Get the metrics from the results
-        full_metrics = metrics['full']
+        # Recalculate optimal ROIs (in case they weren't calculated during reset)
+        if self.optimal_rois is None:
+            self.optimal_rois = self._calculate_optimal_rois()
         
-        # Calculate the difference in metrics
-        precision_diff = roi_metrics.get('precision', 0.0) - full_metrics.get('precision', 0.0)
-        recall_diff = roi_metrics.get('recall', 0.0) - full_metrics.get('recall', 0.0)
-        map_diff = roi_metrics.get('map50', 0.0) - full_metrics.get('map50', 0.0)
-
-        # Average improvement (core reward)
-        metrics_avg_diff = (precision_diff + recall_diff + map_diff) / 3.0
-
-        # Penalize completely empty detections
-        if roi_metrics.get('precision', 0.0) == 0.0 and roi_metrics.get('recall', 0.0):
-            return -5.0, metrics
+        # Calculate coverage of annotations
+        annotations = self.current_sample['annotations']
+        coverage_score = self._calculate_annotation_coverage(self.bboxes, annotations)
         
-        # Efficiency
-        total_roi_area = sum(bbox[2] * bbox[3] for bbox in self.bboxes)
-        image_area = self.image_size[0] * self.image_size[1]
-        coverage_ratio = min(1.0, total_roi_area / image_area)
-        efficiency_factor = max(0.1, (1.0 - coverage_ratio) * 2)
-
+        # Calculate how well our ROIs match optimal ones
+        roi_matching_score = self._calculate_roi_matching(self.bboxes, self.optimal_rois)
         
-        # Weights
-        metric_weight = 7.0      # Stronger focus on quality
-        efficiency_weight = 3.0  # Still encourage small area
-        roi_penalty = -0.5 * max(0, len(self.bboxes) - 5)
+        # Efficiency: reward for using close to optimal number of ROIs
+        optimal_count = len(self.optimal_rois)
+        placed_count = len(self.bboxes)
+        efficiency_score = max(0, 1 - (abs(placed_count - optimal_count) / max(1, optimal_count)))
+        
+        # Calculate overlap among placed ROIs (penalize excessive overlap)
+        overlap_penalty = self._calculate_roi_overlap_penalty(self.bboxes)
+        
+        # Weights for different components
+        coverage_weight = 5.0     # Highest priority: cover all annotations
+        matching_weight = 3.0     # Important: match optimal placement
+        efficiency_weight = 2.0   # Somewhat important: use right number of ROIs
+        overlap_penalty_weight = 1.5  # Penalize excessive overlap
         
         final_reward = (
-        (metrics_avg_diff * metric_weight) +
-        (efficiency_factor * efficiency_weight) +
-        roi_penalty
+            coverage_score * coverage_weight +
+            roi_matching_score * matching_weight +
+            efficiency_score * efficiency_weight -
+            overlap_penalty * overlap_penalty_weight
         )
-
+        
+        # Include metrics for debugging/visualization
+        metrics = {
+            'optimal_rois': self.optimal_rois,
+            'coverage_score': coverage_score,
+            'roi_matching_score': roi_matching_score,
+            'efficiency_score': efficiency_score,
+            'overlap_penalty': overlap_penalty,
+            'optimal_count': optimal_count,
+            'placed_count': placed_count
+        }
+        
         return final_reward, metrics
         
     def _get_bbox_size(self):
@@ -352,6 +442,14 @@ class ROIDetectionEnv(gym.Env):
                              (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])),
                              (0, 255, 255), 1)
         
+        # Draw optimal ROIs in red
+        if self.optimal_rois:
+            for roi in self.optimal_rois:
+                cv2.rectangle(image,
+                             (int(roi[0]), int(roi[1])),
+                             (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
+                             (0, 0, 255), 1)  # Red color
+                
         # Draw all placed bboxes in green
         for bbox in self.bboxes:
             cv2.rectangle(image, 

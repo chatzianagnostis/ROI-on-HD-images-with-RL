@@ -10,7 +10,7 @@ from agent import ROIAgent
 
 def main():
     print("ROI Detection Agent - Training")
-    print("=============================")
+    print("==============================================")
     
     # Check CUDA availability
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -33,11 +33,11 @@ def main():
         shuffle=True
     )
     
-    # Create environment
+    # Create environment (note: no YOLO model needed now)
     env = ROIDetectionEnv(
         dataset=dataset,
         crop_size=(640, 640),
-        yolo_model_path="yolov8n.pt"
+        time_limit=120  # 2 minutes per episode
     )
     
     print(f"Environment ready - dataset has {len(dataset)} samples")
@@ -49,11 +49,11 @@ def main():
         log_dir="logs"
     )
     
-    # Create a CheckpointCallback to save every 10,000 timesteps
+    # Create a CheckpointCallback to save every 15,000 timesteps
     checkpoint_callback = CheckpointCallback(
-        save_freq=15000,  # Save every 10,000 steps
+        save_freq=15000,
         save_path="models/checkpoints/",
-        name_prefix="roi_model",
+        name_prefix="roi_kmeans_model",
         verbose=2
     )
     
@@ -68,8 +68,8 @@ def main():
     print(f"Training completed in {training_time:.2f} seconds")
     
     # Save final model
-    agent.save_model("final_model")
-    print("Final model saved to models/final_model.zip")
+    agent.save_model("final_kmeans_model")
+    print("Final model saved to models/final_kmeans_model.zip")
 
 if __name__ == "__main__":
     main()
