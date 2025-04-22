@@ -6,8 +6,6 @@ This repository implements a Region of Interest (ROI) detection system using Rei
 
 The core innovation of this project is using K-means clustering with an L∞ constraint to determine optimal ROI placement, combined with a reinforcement learning agent that learns to efficiently place ROIs to maximize coverage of annotated objects while minimizing computational resources.
 
-![ROI Detection Example](docs/optimal_roi_visualization.jpg)
-
 ## Key Features
 
 - **K-means based optimal ROI discovery** algorithm that minimizes the number of ROIs while ensuring complete coverage
