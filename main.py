@@ -8,6 +8,8 @@ from ROIDataset import ROIDataset
 from ROIDetectionEnv import ROIDetectionEnv
 from agent import ROIAgent
 
+os.environ['LOKY_MAX_CPU_COUNT'] = '4'
+
 def main():
     print("ROI Detection Agent - Training")
     print("==============================================")

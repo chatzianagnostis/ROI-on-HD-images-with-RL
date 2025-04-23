@@ -74,8 +74,11 @@ class ROIDetectionEnv(gym.Env):
         return self._get_observation()
 
     def step(self, action):
-        """Take a step in the environment based on the action"""
+        """Take a step in the environment based on the action (with reward shaping)"""
         import time
+        
+        # Calculate potential before taking action
+        old_potential = self._potential_function(self.current_bbox)
         
         reward = 0
         done = False
@@ -95,6 +98,19 @@ class ROIDetectionEnv(gym.Env):
         
         if action < 4:  # Move bbox
             self._move_bbox(action)
+            
+            # Calculate potential after moving
+            new_potential = self._potential_function(self.current_bbox)
+            
+            # Potential-based shaping: γΦ(s') - Φ(s)
+            gamma = 0.995  # Match the discount factor used in PPO
+            shaping_reward = gamma * new_potential - old_potential
+            
+            # Scale shaping reward to be much smaller than final reward
+            # Final rewards are typically in the 50-100 range
+            shaping_coeff = 0.05
+            reward += shaping_reward * shaping_coeff
+            
         elif action == 4:  # Place bbox
             reward = self._place_bbox()
         elif action == 5:  # Remove bbox
@@ -172,6 +188,85 @@ class ROIDetectionEnv(gym.Env):
         
         self.bboxes.pop()
         return 0  # Neutral reward for removal
+
+    def _dist_to_nearest_unmatched_opt_roi(self, bbox):
+        """
+        Calculate the minimum Manhattan distance from the center of the current bbox
+        to the center of any optimal ROI that hasn't been matched yet.
+        
+        Args:
+            bbox: [x, y, w, h] format bbox
+            
+        Returns:
+            Minimum Manhattan distance to any unmatched optimal ROI center
+        """
+        if not self.optimal_rois:
+            return 0.0
+        
+        # Calculate center of current bbox
+        bbox_cx = bbox[0] + bbox[2] / 2
+        bbox_cy = bbox[1] + bbox[3] / 2
+        
+        # Find which optimal ROIs already have a corresponding placed bbox
+        matched_opt_rois = []
+        
+        # For each placed bbox, find its best matching optimal ROI
+        for placed_bbox in self.bboxes:
+            best_iou = 0.0
+            best_match = None
+            
+            for i, roi in enumerate(self.optimal_rois):
+                # Use IoU as matching criterion
+                iou = self._calculate_iou(placed_bbox, roi)
+                
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = i
+            
+            # If we found a good match, mark it as matched
+            if best_match is not None and best_iou > 0.1:
+                matched_opt_rois.append(best_match)
+        
+        # Calculate Manhattan distance to each unmatched optimal ROI center
+        min_dist = float('inf')
+        for i, roi in enumerate(self.optimal_rois):
+            # Skip already matched ROIs
+            if i in matched_opt_rois:
+                continue
+                
+            roi_cx = roi[0] + roi[2] / 2
+            roi_cy = roi[1] + roi[3] / 2
+            
+            # Manhattan distance (|x1-x2| + |y1-y2|)
+            dist = abs(bbox_cx - roi_cx) + abs(bbox_cy - roi_cy)
+            
+            # Track minimum distance
+            min_dist = min(min_dist, dist)
+        
+        # If all optimal ROIs are matched, return 0 (no distance penalty)
+        if min_dist == float('inf'):
+            return 0.0
+                
+        return min_dist
+
+    def _potential_function(self, bbox):
+        """
+        Potential function for reward shaping.
+        Returns a higher value when closer to an unmatched optimal ROI.
+        
+        Args:
+            bbox: [x, y, w, h] format bbox
+            
+        Returns:
+            Potential value (negative distance)
+        """
+        # Add small random jitter to prevent overfitting to exact positions
+        # Scale jitter by image dimensions (e.g., ~1% of width/height)
+        jitter_scale = min(self.image_size) * 0.01
+        jitter = np.random.normal(0, jitter_scale)
+        
+        # Base potential is negative distance (higher when closer)
+        return -self._dist_to_nearest_unmatched_opt_roi(bbox) + jitter
 
     def _calculate_iou(self, box1, box2):
         """Calculate IoU between two bounding boxes"""
@@ -361,7 +456,7 @@ class ROIDetectionEnv(gym.Env):
                 iou = self._calculate_iou(rois[i], rois[j])
                 # Only penalize IoU above 0.3
                 if iou > 0.3:
-                    total_penalty += (iou - 0.3)
+                    total_penalty += (iou - 0.1)
         
         return min(1.0, total_penalty)  # Cap penalty at 1.0
 
@@ -390,10 +485,10 @@ class ROIDetectionEnv(gym.Env):
         overlap_penalty = self._calculate_roi_overlap_penalty(self.bboxes)
         
         # Weights for different components
-        coverage_weight = 5.0     # Highest priority: cover all annotations
-        matching_weight = 3.0     # Important: match optimal placement
-        efficiency_weight = 2.0   # Somewhat important: use right number of ROIs
-        overlap_penalty_weight = 1.5  # Penalize excessive overlap
+        coverage_weight = 50.0     # Highest priority: cover all annotations
+        matching_weight = 30.0     # Important: match optimal placement
+        efficiency_weight = 15.0   # Somewhat important: use right number of ROIs
+        overlap_penalty_weight = 5  # Penalize excessive overlap
         
         final_reward = (
             coverage_score * coverage_weight +
@@ -469,3 +564,118 @@ class ROIDetectionEnv(gym.Env):
         elif mode == 'human':
             cv2.imshow('ROI Detection Environment', image)
             cv2.waitKey(1)
+            
+    def visualize_reward_landscape(self, output_path="reward_landscape.jpg"):
+        """
+        Create a visualization of the reward landscape.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib import cm
+        import numpy as np
+        
+        # Find which optimal ROIs are already matched
+        matched_opt_rois = []
+        if self.optimal_rois:
+            for placed_bbox in self.bboxes:
+                best_iou = 0.0
+                best_match = None
+                
+                for i, roi in enumerate(self.optimal_rois):
+                    iou = self._calculate_iou(placed_bbox, roi)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_match = i
+                
+                if best_match is not None and best_iou > 0.1:
+                    matched_opt_rois.append(best_match)
+        
+        # Create a grid of potential values
+        step = max(1, min(self.image_size) // 100)  # Step size for computation efficiency
+        width, height = self.image_size
+        
+        # Initialize grid (fix dimensions to avoid index out of bounds)
+        rows = height // step
+        cols = width // step
+        potential_map = np.zeros((rows, cols))
+        
+        # Calculate potential for a bounding box centered at each grid point
+        for i in range(0, rows * step, step):
+            for j in range(0, cols * step, step):
+                # Only process points within the grid
+                if i // step >= rows or j // step >= cols:
+                    continue
+                    
+                # Create a bounding box centered at this location
+                test_bbox = [
+                    max(0, j - self.bbox_size[0] // 2),
+                    max(0, i - self.bbox_size[1] // 2),
+                    self.bbox_size[0],
+                    self.bbox_size[1]
+                ]
+                
+                # Skip jitter in visualization for clarity
+                potential = -self._dist_to_nearest_unmatched_opt_roi(test_bbox)
+                potential_map[i // step, j // step] = potential
+        
+        # Normalize values from 0 to 1 for visualization
+        potential_min = np.min(potential_map)
+        potential_max = np.max(potential_map)
+        if potential_max != potential_min:  # Prevent division by zero
+            potential_map = (potential_map - potential_min) / (potential_max - potential_min)
+        
+        # Create visualization
+        plt.figure(figsize=(10, 10))
+        
+        # Show the image
+        plt.imshow(cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB))
+        
+        # Overlay the potential map
+        plt.imshow(potential_map, cmap=cm.jet, alpha=0.5, interpolation='bilinear', 
+                extent=[0, width, height, 0])  # Note: y-axis is inverted for images
+        
+        # Draw optimal ROIs
+        if self.optimal_rois:
+            for i, roi in enumerate(self.optimal_rois):
+                if i in matched_opt_rois:
+                    # Draw matched ROIs with green edge
+                    plt.gca().add_patch(plt.Rectangle(
+                        (roi[0], roi[1]), roi[2], roi[3], 
+                        linewidth=2, edgecolor='g', facecolor='none'
+                    ))
+                else:
+                    # Draw unmatched ROIs with red edge
+                    plt.gca().add_patch(plt.Rectangle(
+                        (roi[0], roi[1]), roi[2], roi[3], 
+                        linewidth=2, edgecolor='r', facecolor='none'
+                    ))
+        
+        # Draw already placed bboxes
+        for bbox in self.bboxes:
+            plt.gca().add_patch(plt.Rectangle(
+                (bbox[0], bbox[1]), bbox[2], bbox[3], 
+                linewidth=2, edgecolor='g', facecolor='none', linestyle='--'
+            ))
+        
+        # Add colorbar
+        cbar = plt.colorbar()
+        cbar.set_label('Normalized Potential Value\n(Higher is Better)')
+        
+        plt.title('Reward Shaping Landscape (Targeting Unmatched Optimal ROIs)')
+        plt.xlabel('X coordinate')
+        plt.ylabel('Y coordinate')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='none', edgecolor='r', linewidth=2, label='Unmatched Optimal ROI'),
+            Patch(facecolor='none', edgecolor='g', linewidth=2, label='Matched Optimal ROI'),
+            Patch(facecolor='none', edgecolor='g', linewidth=2, linestyle='--', label='Placed Bbox')
+        ]
+        plt.legend(handles=legend_elements, loc='upper right')
+        
+        # Save figure
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Reward landscape visualization saved to {output_path}")
+        return output_path

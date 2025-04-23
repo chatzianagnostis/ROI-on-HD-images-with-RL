@@ -15,9 +15,9 @@ The task is formulated as a reinforcement learning problem with the following co
 - **Reward**: Composite score based on annotation coverage, optimal ROI matching, efficiency, and overlap penalties
 - **Goal**: Maximize coverage of annotations with the minimum number of ROIs
 
-### 2. Optimal ROI Determination via Clustering
+### 2. Optimal ROI Determination via K-means Clustering
 
-The central innovation in this project is the use of K-means clustering to determine optimal ROI placement:
+The central innovation in this project is the use of K-means clustering with L∞ constraint to determine optimal ROI placement:
 
 1. **Center Collection**: Extract the center point of each annotation
 2. **Minimal K Search**: Find the smallest number of clusters (k) such that all annotations in each cluster can be covered by a single ROI
@@ -25,22 +25,33 @@ The central innovation in this project is the use of K-means clustering to deter
    - max |Δx| ≤ half_width
    - max |Δy| ≤ half_height
    Where Δx and Δy are distances from points to the cluster center
-4. **ROI Placement**: Place ROIs centered on each valid cluster center
+4. **ROI Placement**: Place ROIs centered on each valid cluster center, clamped to stay within image boundaries
 
 This approach provides a mathematically sound basis for determining the minimum number of ROIs needed to cover all annotations.
 
-### 3. Multi-faceted Reward System
+### 3. Potential-Based Reward Shaping
 
-The reward system is designed to guide the agent toward optimal ROI placement through multiple weighted components:
+The system implements potential-based reward shaping to guide the agent toward optimal behavior:
 
-- **Coverage Score** (weight: 5.0): Percentage of annotations properly covered by ROIs
-- **ROI Matching Score** (weight: 3.0): How well placed ROIs match the optimal ROIs from K-means
-- **Efficiency Score** (weight: 2.0): How close the number of placed ROIs is to the optimal number
-- **Overlap Penalty** (weight: 1.5): Penalty for excessive overlap between ROIs
+1. **Distance-Based Potential**: Higher potential value when closer to unmatched optimal ROIs
+2. **Target Prioritization**: Focuses on unmatched ROIs to encourage complete coverage
+3. **Smooth Gradient**: Provides continuous guidance during movement actions
+4. **Small Jitter**: Adds random noise to prevent overfitting to exact positions
+
+This approach enables more efficient learning by providing intermediate rewards during exploration.
+
+### 4. Multi-faceted Reward System
+
+The final reward system is designed to guide the agent toward optimal ROI placement through multiple weighted components:
+
+- **Coverage Score** (weight: 50.0): Percentage of annotations properly covered by ROIs
+- **ROI Matching Score** (weight: 30.0): How well placed ROIs match the optimal ROIs from K-means
+- **Efficiency Score** (weight: 15.0): How close the number of placed ROIs is to the optimal number
+- **Overlap Penalty** (weight: 5.0): Penalty for excessive overlap between ROIs
 
 This weighted approach prioritizes complete annotation coverage while encouraging efficient use of ROIs and alignment with the optimal solution.
 
-### 4. Neural Network Architecture for Feature Fusion
+### 5. Neural Network Architecture for Feature Fusion
 
 The agent uses a specialized neural network architecture to process both visual and state information:
 
@@ -50,21 +61,21 @@ The agent uses a specialized neural network architecture to process both visual 
 
 This architecture enables the agent to simultaneously reason about image content and the current state of ROI placement.
 
-### 5. Training with Proximal Policy Optimization
+### 6. Training with Proximal Policy Optimization
 
 The training methodology employs Proximal Policy Optimization (PPO) with carefully tuned hyperparameters:
 
-- **Learning Steps**: 512 timesteps per update
+- **Learning Steps**: 2048 timesteps per update
 - **Optimization Iterations**: 10 epochs per update
-- **Batch Size**: 64 samples per optimization step
-- **Discount Factor**: 0.99 for long-term reward consideration
+- **Batch Size**: 32 samples per optimization step
+- **Discount Factor**: 0.995 for long-term reward consideration
 - **Advantage Estimation**: GAE with λ=0.95
 - **Policy Updates**: Clipped to prevent destructive changes
-- **Entropy Coefficient**: 0.01 to encourage exploration
+- **Entropy Coefficient**: 0.001 to encourage exploration
 
 This configuration balances exploration, learning speed, and training stability.
 
-### 6. Evaluation Framework
+### 7. Evaluation Framework
 
 The methodology includes a comprehensive evaluation framework with both qualitative and quantitative components:
 
@@ -72,6 +83,7 @@ The methodology includes a comprehensive evaluation framework with both qualitat
 - **Automated Testing**: Random action generation for unbiased assessment
 - **Performance Metrics**: Coverage, efficiency, and ROI placement quality
 - **Action Analysis**: Distribution and reward correlation of different actions
+- **Reward Landscape Visualization**: Visual representation of the potential function
 
 This framework enables thorough assessment of both the agent's performance and the environment's characteristics.
 
@@ -87,6 +99,7 @@ The project's methodology integrates these components into a cohesive workflow:
 2. **Environment Definition**:
    - The `ROIDetectionEnv` class implements the Gym interface
    - K-means clustering determines optimal ROI placement
+   - Potential-based reward shaping guides learning
    - Actions allow ROI manipulation and placement
    - Rewards guide the agent toward optimal behavior
 
@@ -113,7 +126,16 @@ The use of K-means clustering with an L∞ constraint for determining optimal RO
 - Adapts to different spatial distributions of objects
 - Operates with a fixed ROI size constraint
 
-### 2. Composite Reward Function
+### 2. Potential-Based Reward Shaping
+
+The implementation of potential-based reward shaping is an important innovation for guiding the agent's learning process:
+
+- Provides continuous feedback during exploration
+- Directs the agent toward unmatched optimal ROIs
+- Accelerates learning by making the reward landscape more informative
+- Adds jitter to prevent getting stuck in local optima
+
+### 3. Composite Reward Function
 
 The multi-component reward function with carefully calibrated weights represents another methodological innovation. This design:
 
@@ -122,7 +144,7 @@ The multi-component reward function with carefully calibrated weights represents
 - Provides clear learning signals for different aspects of performance
 - Discourages suboptimal strategies like excessive ROI overlap
 
-### 3. Feature Fusion Architecture
+### 4. Feature Fusion Architecture
 
 The neural network architecture that fuses visual and state features is innovative in its approach to the ROI detection problem. This design:
 
@@ -145,6 +167,6 @@ Several methodological considerations should be noted:
 
 ## Conclusion
 
-The methodology implemented in this project represents a principled approach to the ROI detection problem using reinforcement learning. By combining K-means clustering for optimal ROI determination, a multi-faceted reward system, and a specialized neural network architecture, the system learns to efficiently place ROIs to maximize annotation coverage while minimizing resource usage.
+The methodology implemented in this project represents a principled approach to the ROI detection problem using reinforcement learning. By combining K-means clustering for optimal ROI determination, potential-based reward shaping, a multi-faceted reward system, and a specialized neural network architecture, the system learns to efficiently place ROIs to maximize annotation coverage while minimizing resource usage.
 
 This approach is particularly valuable for applications where computational resources are limited and focusing detection on specific regions is more efficient than processing entire high-resolution images.

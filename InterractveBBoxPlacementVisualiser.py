@@ -12,6 +12,8 @@ from pathlib import Path
 from ROIDataset import ROIDataset
 from ROIDetectionEnv import ROIDetectionEnv
 
+os.environ['LOKY_MAX_CPU_COUNT'] = '4'
+
 class ROIEnvTester:
     def __init__(self, dataset_path, coco_json_path, crop_size=(640, 640)):
         """
@@ -98,13 +100,13 @@ class ROIEnvTester:
             # Map key to action
             action = None
             
-            if key == ord('w') or key == 82:  # W or Up arrow
+            if key == ord('w'):  # W key
                 action = 0  # Move up
-            elif key == ord('s') or key == 84:  # S or Down arrow
+            elif key == ord('s'):  # S key
                 action = 1  # Move down
-            elif key == ord('a') or key == 81:  # A or Left arrow
+            elif key == ord('a'):  # A key
                 action = 2  # Move left
-            elif key == ord('d') or key == 83:  # D or Right arrow
+            elif key == ord('d'):  # D key
                 action = 3  # Move right
             elif key == ord(' '):  # Space
                 action = 4  # Place bbox
@@ -112,6 +114,10 @@ class ROIEnvTester:
                 action = 5  # Remove bbox
             elif key == ord('e'):  # E
                 action = 6  # End episode
+            elif key == ord('v'):  # V key
+                visualization_path = self.env.visualize_reward_landscape("reward_landscape.jpg")
+                reward_landscape = cv2.imread(visualization_path)
+                cv2.imshow("Reward Landscape", reward_landscape)
             elif key == ord('k'):  # K - toggle optimal ROIs
                 show_optimal = not show_optimal
                 frame = self.env.render(mode='rgb_array')
