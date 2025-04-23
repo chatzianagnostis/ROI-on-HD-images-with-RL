@@ -55,7 +55,7 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=15000,
         save_path="models/checkpoints/",
-        name_prefix="roi_kmeans_model",
+        name_prefix="roi_model",
         verbose=2
     )
     
@@ -70,8 +70,8 @@ def main():
     print(f"Training completed in {training_time:.2f} seconds")
     
     # Save final model
-    agent.save_model("final_kmeans_model")
-    print("Final model saved to models/final_kmeans_model.zip")
+    agent.save_model("final_roi_model")
+    print("Final model saved to models/final_roi_model.zip")
 
 if __name__ == "__main__":
     main()

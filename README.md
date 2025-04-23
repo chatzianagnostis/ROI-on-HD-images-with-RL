@@ -121,21 +121,13 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Citation
 
-If you use this code in your research, please cite:
-
 ```
 @misc{roi-detection-rl,
-  author = {Your Name},
+  author = {evangelos Chatzianagnosis},
   title = {ROI Detection with Reinforcement Learning},
   year = {2025},
   publisher = {GitHub},
   journal = {GitHub repository},
-  howpublished = {\url{https://github.com/yourusername/roi-detection-rl}}
+  howpublished = {\url{https://github.com/chatzianagnostis/ROI-on-HD-images-with-RL}}
 }
 ```
-
-## Acknowledgements
-
-- The project uses the Stable-Baselines3 implementation of PPO
-- ResNet18 pretrained weights are from torchvision
-- Thanks to the developers of OpenCV, PyTorch, and scikit-learn

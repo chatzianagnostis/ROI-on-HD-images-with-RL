@@ -107,8 +107,8 @@ class ROIDetectionEnv(gym.Env):
             shaping_reward = gamma * new_potential - old_potential
             
             # Scale shaping reward to be much smaller than final reward
-            # Final rewards are typically in the 50-100 range
-            shaping_coeff = 0.05
+            # Final rewards are typically in the 10-100 range
+            shaping_coeff = 0.01
             reward += shaping_reward * shaping_coeff
             
         elif action == 4:  # Place bbox
