@@ -31,6 +31,8 @@ class ROIDetectionEnv(gym.Env):
         # 5: Remove bbox
         # 6: End episode
         self.action_space = spaces.Discrete(7)
+
+        self.shaping_coeff = 0.01  # Coefficient for shaping reward
         
         # Observation space: image and current bbox state
         self.observation_space = spaces.Dict({
@@ -109,7 +111,7 @@ class ROIDetectionEnv(gym.Env):
             # Scale shaping reward to be much smaller than final reward
             # Final rewards are typically in the 10-100 range
             shaping_coeff = 0.01
-            reward += shaping_reward * shaping_coeff
+            reward += shaping_reward * self.shaping_coeff
             
         elif action == 4:  # Place bbox
             reward = self._place_bbox()
