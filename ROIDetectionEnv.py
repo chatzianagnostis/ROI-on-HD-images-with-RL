@@ -108,9 +108,7 @@ class ROIDetectionEnv(gym.Env):
             gamma = 0.995  # Match the discount factor used in PPO
             shaping_reward = gamma * new_potential - old_potential
             
-            # Scale shaping reward to be much smaller than final reward
-            # Final rewards are typically in the 10-100 range
-            shaping_coeff = 0.01
+            # Apply shaping coefficient
             reward += shaping_reward * self.shaping_coeff
             
         elif action == 4:  # Place bbox
@@ -262,13 +260,19 @@ class ROIDetectionEnv(gym.Env):
         Returns:
             Potential value (negative distance)
         """
-        # Add small random jitter to prevent overfitting to exact positions
-        # Scale jitter by image dimensions (e.g., ~1% of width/height)
-        jitter_scale = min(self.image_size) * 0.01
-        jitter = np.random.normal(0, jitter_scale)
+        # Calculate distance to nearest unmatched optimal ROI
+        distance = self._dist_to_nearest_unmatched_opt_roi(bbox)
         
-        # Base potential is negative distance (higher when closer)
-        return -self._dist_to_nearest_unmatched_opt_roi(bbox) + jitter
+        # Use a seeded random for more consistent jitter
+        # You can seed it based on the bbox position to make it deterministic
+        # This keeps jitter consistent for the same positions
+        jitter_seed = int(bbox[0] * 1000 + bbox[1])
+        rng = np.random.RandomState(jitter_seed)
+        jitter_scale = min(self.image_size) * 0.005  # Reduced scale
+        jitter = rng.normal(0, jitter_scale)
+        
+        # Return negative distance (higher is better) plus jitter
+        return -distance + jitter
 
     def _calculate_iou(self, box1, box2):
         """Calculate IoU between two bounding boxes"""

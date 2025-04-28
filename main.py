@@ -65,7 +65,7 @@ def main():
         check_freq=15000,  # Check every 15000 steps
         window_size=100,  # Use last 100 episodes
         initial_coeff=0.01,  # Normal shaping strength 
-        boost_coeff=0.1,  # Boosted shaping strength
+        boost_coeff=0.05,  # Boosted shaping strength
         verbose=1  # Print when changing
     )
 
@@ -76,7 +76,7 @@ def main():
     start_time = time.time()
     
     # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=1000000, callback=callbacks)
+    agent.train(total_timesteps=1500000, callback=callbacks)
     
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")

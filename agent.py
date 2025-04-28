@@ -84,7 +84,7 @@ class ROIAgent:
             batch_size=64,
             n_epochs=10,
             gamma=0.995,
-            gae_lambda=0.95,
+            gae_lambda=0.995,
             ent_coef=1e-3,
             clip_range=0.2,
             vf_coef = 0.5,
