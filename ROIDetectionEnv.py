@@ -60,6 +60,9 @@ class ROIDetectionEnv(gym.Env):
         # Calculate visual bbox size for the resized image
         self.bbox_size = self._get_bbox_size()
         
+        # Process annotations that are taller than bbox size
+        self._process_tall_annotations()
+        
         # Calculate optimal ROIs using K-means
         self.optimal_rois = self._calculate_optimal_rois()
 
@@ -74,6 +77,31 @@ class ROIDetectionEnv(gym.Env):
         ]
 
         return self._get_observation()
+
+    def _process_tall_annotations(self):
+        """Process annotations that are taller than the bbox size by cropping them"""
+        if 'annotations' not in self.current_sample:
+            return
+            
+        processed_annotations = []
+        
+        for ann in self.current_sample['annotations']:
+            bbox = ann['bbox']  # [x, y, w, h]
+            
+            # If annotation height is smaller than bbox_size, keep it as is
+            if bbox[3] <= self.bbox_size[1]:
+                processed_annotations.append(ann)
+                continue
+                
+            # For taller annotations, create a new annotation with the top part
+            top_part = ann.copy()
+            top_part['bbox'] = [bbox[0], bbox[1], bbox[2], self.bbox_size[1]]
+            processed_annotations.append(top_part)
+            
+            # You could also create additional annotations for other parts if needed
+            # For example, to cover the middle or bottom parts
+        
+        self.current_sample['annotations'] = processed_annotations
 
     def step(self, action):
         """Take a step in the environment based on the action (with reward shaping)"""
@@ -175,7 +203,7 @@ class ROIDetectionEnv(gym.Env):
         """Place the current bounding box"""
         # Check for overlap with existing bboxes
         for bbox in self.bboxes:
-            if self._calculate_iou(self.current_bbox, bbox) > 0.3:
+            if self._calculate_iou(self.current_bbox, bbox) > 0.8:
                 return -1  # Penalty for overlap
         
         self.bboxes.append(self.current_bbox.copy())
@@ -267,6 +295,7 @@ class ROIDetectionEnv(gym.Env):
         # You can seed it based on the bbox position to make it deterministic
         # This keeps jitter consistent for the same positions
         jitter_seed = int(bbox[0] * 1000 + bbox[1])
+        jitter_seed = abs(int(jitter_seed)) % (2**32)
         rng = np.random.RandomState(jitter_seed)
         jitter_scale = min(self.image_size) * 0.005  # Reduced scale
         jitter = rng.normal(0, jitter_scale)
@@ -485,22 +514,22 @@ class ROIDetectionEnv(gym.Env):
         # Efficiency: reward for using close to optimal number of ROIs
         optimal_count = len(self.optimal_rois)
         placed_count = len(self.bboxes)
-        efficiency_score = max(0, 1 - (abs(placed_count - optimal_count) / max(1, optimal_count)))
+        # efficiency_score = max(0, 1 - (abs(placed_count - optimal_count) / max(1, optimal_count)))
         
         # Calculate overlap among placed ROIs (penalize excessive overlap)
-        overlap_penalty = self._calculate_roi_overlap_penalty(self.bboxes)
+        # overlap_penalty = self._calculate_roi_overlap_penalty(self.bboxes)
         
         # Weights for different components
-        coverage_weight = 50.0     # Highest priority: cover all annotations
+        coverage_weight = 70.0     # Highest priority: cover all annotations
         matching_weight = 30.0     # Important: match optimal placement
-        efficiency_weight = 15.0   # Somewhat important: use right number of ROIs
-        overlap_penalty_weight = 5  # Penalize excessive overlap
+        # efficiency_weight = 15.0   # Somewhat important: use right number of ROIs
+        # overlap_penalty_weight = 5  # Penalize excessive overlap
         
         final_reward = (
             coverage_score * coverage_weight +
-            roi_matching_score * matching_weight +
-            efficiency_score * efficiency_weight -
-            overlap_penalty * overlap_penalty_weight
+            roi_matching_score * matching_weight #+
+            # efficiency_score * efficiency_weight -
+            # overlap_penalty * overlap_penalty_weight
         )
         
         # Include metrics for debugging/visualization
@@ -508,8 +537,8 @@ class ROIDetectionEnv(gym.Env):
             'optimal_rois': self.optimal_rois,
             'coverage_score': coverage_score,
             'roi_matching_score': roi_matching_score,
-            'efficiency_score': efficiency_score,
-            'overlap_penalty': overlap_penalty,
+            # 'efficiency_score': efficiency_score,
+            # 'overlap_penalty': overlap_penalty,
             'optimal_count': optimal_count,
             'placed_count': placed_count
         }

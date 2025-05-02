@@ -2,7 +2,9 @@ import os
 import time
 import torch
 from stable_baselines3.common.callbacks import CheckpointCallback
-from callbacks import DynamicRewardShapingCallback
+from utils.callbacks import DynamicRewardShapingCallback
+from utils.loggers import TrainingLogger
+
 
 # Import required classes
 from ROIDataset import ROIDataset
@@ -21,11 +23,12 @@ def main():
     
     # Create output directories
     os.makedirs("models", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
     
     # 1. Setup dataset and environment
     print("Setting up environment...")
-    dataset_path = "G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train"
-    coco_json_path = "G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json"
+    dataset_path = "G:\\rl\\overfit\\images"
+    coco_json_path = "G:\\rl\\overfit\\overfit.json"
     
     # Create dataset with 640x640 images as requested
     dataset = ROIDataset(
@@ -36,7 +39,7 @@ def main():
         shuffle=True
     )
     
-    # Create environment (note: no YOLO model needed now)
+    # Create environment
     env = ROIDetectionEnv(
         dataset=dataset,
         crop_size=(640, 640),
@@ -52,7 +55,7 @@ def main():
         log_dir="logs"
     )
     
-    # Create a CheckpointCallback to save every 15,000 timesteps
+    # Create a CheckpointCallback
     checkpoint_callback = CheckpointCallback(
         save_freq=15000,
         save_path="models/checkpoints/",
@@ -68,15 +71,19 @@ def main():
         boost_coeff=0.05,  # Boosted shaping strength
         verbose=1  # Print when changing
     )
+    
+    # Add our simple logger
+    logger_callback = TrainingLogger(log_dir="logs", verbose=1)
 
-    callbacks = [checkpoint_callback, shaping_callback]
+    # Combine all callbacks
+    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
 
     # Train and save model
     print("\nTraining agent...")
     start_time = time.time()
     
     # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=1500000, callback=callbacks)
+    agent.train(total_timesteps=1000000, callback=callbacks)
     
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")
