@@ -2,6 +2,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 import numpy as np
 import os
 import json
+import time
 from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 
@@ -9,17 +10,26 @@ class TrainingLogger(BaseCallback):
     """
     A logger that clearly separates each episode with visual delimiters,
     shows detailed per-action rewards, saves metrics to txt files,
-    and logs to TensorBoard.
+    and logs to TensorBoard. Each training run gets its own folder.
     """
     def __init__(self, log_dir="logs", verbose=1):
         super(TrainingLogger, self).__init__(verbose)
-        self.log_dir = log_dir
-        self.txt_dir = os.path.join(log_dir, "txt_logs")
+        
+        # Create a timestamped run directory for this specific training session
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        self.run_dir = os.path.join(log_dir, "runs", f"run_{timestamp}")
+        self.ppo_dir = os.path.join(self.run_dir, "ppo_")
+        self.txt_dir = os.path.join(self.run_dir, "txt_logs")
+        
+        # Create all necessary directories
         os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(os.path.join(log_dir, "runs"), exist_ok=True)
+        os.makedirs(self.run_dir, exist_ok=True)
+        os.makedirs(self.ppo_dir, exist_ok=True)
         os.makedirs(self.txt_dir, exist_ok=True)
         
-        # Initialize TensorBoard writer
-        self.tb_writer = SummaryWriter(log_dir=os.path.join(log_dir, "tensorboard"))
+        # Initialize TensorBoard writer for this specific run
+        self.tb_writer = SummaryWriter(log_dir=self.run_dir)
         
         # Track current episode
         self.episode_actions = []
@@ -36,10 +46,30 @@ class TrainingLogger(BaseCallback):
                            "Place Bbox", "Remove Bbox", "End Episode"]
         
         # Create log file for current session
-        self.session_log_path = os.path.join(self.txt_dir, f"training_session_{int(os.path.getmtime(self.txt_dir))}.txt")
+        self.session_log_path = os.path.join(self.txt_dir, "training_session.txt")
         
-        # Print initial episode header
+        # Print initial episode header and log run information
+        self._log_run_info()
         self._print_episode_header()
+    
+    def _log_run_info(self):
+        """Log information about this training run"""
+        run_info = f"ROI DETECTION AGENT - TRAINING RUN\n"
+        run_info += f"Run directory: {self.run_dir}\n"
+        run_info += f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        run_info += f"{'='*60}\n\n"
+        
+        # Save to run directory
+        run_info_path = os.path.join(self.run_dir, "run_info.txt")
+        with open(run_info_path, 'w') as f:
+            f.write(run_info)
+        
+        # Also print to console
+        print(run_info)
+        
+        # Save to session log
+        with open(self.session_log_path, 'w') as f:
+            f.write(run_info)
         
     def _on_step(self) -> bool:
         # Get locals from training
@@ -196,8 +226,8 @@ class TrainingLogger(BaseCallback):
         if 'metrics' in info:
             episode_data['metrics'] = info['metrics']
         
-        # Save to json file, one file per episode
-        filepath = os.path.join(self.log_dir, f"episode_{self.episode_counter}.json")
+        # Save to json file in the ppo_ directory
+        filepath = os.path.join(self.ppo_dir, f"episode_{self.episode_counter}.json")
         with open(filepath, 'w') as f:
             json.dump(episode_data, f)
         
@@ -233,14 +263,14 @@ class TrainingLogger(BaseCallback):
                     metrics_line += f"Time used: {time_info['elapsed']:.2f}s / {time_info['limit']:.2f}s"
                 
                 f.write(metrics_line + "\n")
-    
+
     def _log_to_tensorboard(self, total_reward, info):
-        """Log metrics to TensorBoard"""
+        """Log metrics to TensorBoard with standard PPO naming conventions"""
         # Log episode reward
-        self.tb_writer.add_scalar("charts/episodic_return", total_reward, self.episode_counter)
-        self.tb_writer.add_scalar("charts/episode_length", self.step_counter, self.episode_counter)
+        self.tb_writer.add_scalar("rollout/ep_rew_mean", total_reward, self.num_timesteps)
+        self.tb_writer.add_scalar("rollout/ep_len_mean", self.step_counter, self.num_timesteps)
         
-        # Log action distribution
+        # Log action distribution with standard PPO format
         action_counts = {}
         for action in self.episode_actions:
             if action not in action_counts:
@@ -254,43 +284,36 @@ class TrainingLogger(BaseCallback):
             else:
                 percentage = 0
             
-            self.tb_writer.add_scalar(f"actions/{self.action_names[action]}_percentage", percentage, self.episode_counter)
-            self.tb_writer.add_scalar(f"actions/{self.action_names[action]}_count", count, self.episode_counter)
+            # Use standard PPO naming convention
+            self.tb_writer.add_scalar(f"PPO/{self.action_names[action]}_frequency", percentage, self.num_timesteps)
         
-        # Log average rewards per action
-        for action in range(len(self.action_names)):
-            rewards = [r for a, r in zip(self.episode_actions, self.episode_rewards) if a == action]
-            if rewards:
-                avg_reward = np.mean(rewards)
-                self.tb_writer.add_scalar(f"rewards/{self.action_names[action]}_avg", avg_reward, self.episode_counter)
-        
-        # Log metrics if available
+        # Log metrics if available with PPO prefix
         if 'metrics' in info:
             metrics = info['metrics']
             
             # Coverage score
             if 'coverage_score' in metrics:
-                self.tb_writer.add_scalar("metrics/coverage_score", metrics['coverage_score'], self.episode_counter)
+                self.tb_writer.add_scalar("PPO/coverage_score", metrics['coverage_score'], self.num_timesteps)
             
             # ROI matching score
             if 'roi_matching_score' in metrics:
-                self.tb_writer.add_scalar("metrics/roi_matching_score", metrics['roi_matching_score'], self.episode_counter)
+                self.tb_writer.add_scalar("PPO/roi_matching_score", metrics['roi_matching_score'], self.num_timesteps)
             
             # Efficiency score
             if 'efficiency_score' in metrics:
-                self.tb_writer.add_scalar("metrics/efficiency_score", metrics['efficiency_score'], self.episode_counter)
+                self.tb_writer.add_scalar("PPO/efficiency_score", metrics['efficiency_score'], self.num_timesteps)
             
             # Overlap penalty
             if 'overlap_penalty' in metrics:
-                self.tb_writer.add_scalar("metrics/overlap_penalty", metrics['overlap_penalty'], self.episode_counter)
+                self.tb_writer.add_scalar("PPO/overlap_penalty", metrics['overlap_penalty'], self.num_timesteps)
             
             # ROI counts
             if 'optimal_count' in metrics and 'placed_count' in metrics:
-                self.tb_writer.add_scalar("metrics/optimal_roi_count", metrics['optimal_count'], self.episode_counter)
-                self.tb_writer.add_scalar("metrics/placed_roi_count", metrics['placed_count'], self.episode_counter)
-                self.tb_writer.add_scalar("metrics/roi_count_difference", 
-                                         metrics['placed_count'] - metrics['optimal_count'], 
-                                         self.episode_counter)
+                self.tb_writer.add_scalar("PPO/optimal_roi_count", metrics['optimal_count'], self.num_timesteps)
+                self.tb_writer.add_scalar("PPO/placed_roi_count", metrics['placed_count'], self.num_timesteps)
+                self.tb_writer.add_scalar("PPO/roi_count_difference", 
+                                        metrics['placed_count'] - metrics['optimal_count'], 
+                                        self.num_timesteps)
     
     def on_training_end(self):
         """Called when training ends"""
@@ -298,6 +321,7 @@ class TrainingLogger(BaseCallback):
         final_stats = f"\n{'#'*80}\nTRAINING COMPLETE - FINAL STATISTICS\n{'#'*80}\n"
         final_stats += f"Total Episodes: {self.episode_counter}\n"
         final_stats += f"Total Timesteps: {self.num_timesteps}\n"
+        final_stats += f"Run directory: {self.run_dir}\n"
         
         # Action distribution
         total_actions = sum(self.action_counts.values())
@@ -330,6 +354,29 @@ class TrainingLogger(BaseCallback):
         final_stats_path = os.path.join(self.txt_dir, "final_training_stats.txt")
         with open(final_stats_path, 'w') as f:
             f.write(final_stats)
+        
+        # Also save a copy of the final stats to the ppo_ directory for convenience
+        ppo_stats_path = os.path.join(self.ppo_dir, "final_training_stats.json")
+        with open(ppo_stats_path, 'w') as f:
+            stats_dict = {
+                "episodes": self.episode_counter,
+                "timesteps": self.num_timesteps,
+                "run_dir": self.run_dir,
+                "action_counts": dict(self.action_counts),
+                "action_rewards": {action: {
+                    "mean": float(np.mean(rewards)) if rewards else None,
+                    "min": float(np.min(rewards)) if rewards else None,
+                    "max": float(np.max(rewards)) if rewards else None,
+                    "count": len(rewards)
+                } for action, rewards in self.action_rewards.items()}
+            }
+            json.dump(stats_dict, f, indent=2)
+        
+        # Save a run_complete marker file
+        with open(os.path.join(self.run_dir, "run_complete.txt"), 'w') as f:
+            f.write(f"Training completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total episodes: {self.episode_counter}\n")
+            f.write(f"Total timesteps: {self.num_timesteps}\n")
         
         # Close TensorBoard writer
         self.tb_writer.close()

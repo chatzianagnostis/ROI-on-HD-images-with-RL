@@ -49,10 +49,13 @@ def main():
     print(f"Environment ready - dataset has {len(dataset)} samples")
     
     # 2. Create and train agent
+    # Modified this part to use the same log directory for all logs
+    log_dir = "logs"  # Single log directory for all logs
     agent = ROIAgent(
         env=env,
         model_dir="models",
-        log_dir="logs"
+        log_dir=log_dir,  # Pass the same log directory
+        tensorboard_log=log_dir  # Use the same directory for tensorboard
     )
     
     # Create a CheckpointCallback
@@ -73,7 +76,7 @@ def main():
     )
     
     # Add our simple logger
-    logger_callback = TrainingLogger(log_dir="logs", verbose=1)
+    logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)  # Use the same log directory
 
     # Combine all callbacks
     callbacks = [checkpoint_callback, shaping_callback, logger_callback]

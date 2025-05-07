@@ -32,7 +32,7 @@ class ROIDetectionEnv(gym.Env):
         # 6: End episode
         self.action_space = spaces.Discrete(7)
 
-        self.shaping_coeff = 0.01  # Coefficient for shaping reward
+        self.shaping_coeff = 0.0  # Coefficient for shaping reward
         
         # Observation space: image and current bbox state
         self.observation_space = spaces.Dict({
@@ -129,15 +129,16 @@ class ROIDetectionEnv(gym.Env):
         if action < 4:  # Move bbox
             self._move_bbox(action)
             
-            # Calculate potential after moving
-            new_potential = self._potential_function(self.current_bbox)
+            # # Calculate potential after moving
+            # new_potential = self._potential_function(self.current_bbox)
             
-            # Potential-based shaping: γΦ(s') - Φ(s)
-            gamma = 0.995  # Match the discount factor used in PPO
-            shaping_reward = gamma * new_potential - old_potential
+            # # Potential-based shaping: γΦ(s') - Φ(s)
+            # gamma = 0.995  # Match the discount factor used in PPO
+            # shaping_reward = gamma * new_potential - old_potential
             
-            # Apply shaping coefficient
-            reward += shaping_reward * self.shaping_coeff
+            # # Apply shaping coefficient
+            # reward += shaping_reward * self.shaping_coeff
+            reward += 0.0
             
         elif action == 4:  # Place bbox
             reward = self._place_bbox()
@@ -200,22 +201,66 @@ class ROIDetectionEnv(gym.Env):
                                      self.current_bbox[0] + step_size)
 
     def _place_bbox(self):
-        """Place the current bounding box"""
-        # Check for overlap with existing bboxes
-        for bbox in self.bboxes:
-            if self._calculate_iou(self.current_bbox, bbox) > 0.8:
-                return -1  # Penalty for overlap
+        """Place the current bounding box and reward based on IoU with optimal ROIs"""
+        # # Check for overlap with existing bboxes
+        # for bbox in self.bboxes:
+        #     if self._calculate_iou(self.current_bbox, bbox) > 0.8:
+        #         return -0.2  # Penalty for overlap with existing boxes
         
+        # Calculate max IoU with any optimal ROI
+        max_iou = 0
+        best_match_idx = None
+        
+        if self.optimal_rois:
+            for i, opt_roi in enumerate(self.optimal_rois):
+                iou = self._calculate_iou(self.current_bbox, opt_roi)
+                if iou > max_iou:
+                    max_iou = iou
+                    best_match_idx = i
+        
+        # Add the bbox to our collection
         self.bboxes.append(self.current_bbox.copy())
-        return 0  # Neutral reward for placement
+    
+        # # Reward based on IoU with optimal ROIs
+        # if max_iou > 0:
+        #     # Scaling factor to make the reward meaningful
+        #     # Higher IoU gives exponentially higher reward
+        #     reward = max_iou * max_iou * 10  #emphasize good matches
+        #     return reward
+        
+        return 0.0  # Neutral reward if no good match
 
     def _remove_bbox(self):
-        """Remove the last placed bounding box"""
-        if not self.bboxes:
-            return -0.1  # Penalty for trying to remove when no bbox exists
+        """
+        Remove the last placed bounding box with smart rewards:
+        - Small reward for removing low-quality boxes (poor IoU with optimal ROIs)
+        - Penalty for removing good boxes (high IoU with optimal ROIs)
+        """
+        # if not self.bboxes:
+        #     return -0.1  # Penalty for trying to remove when no bbox exists
         
-        self.bboxes.pop()
-        return 0  # Neutral reward for removal
+        # # Get the last placed bbox
+        # last_bbox = self.bboxes[-1]
+        
+        # # Calculate max IoU with any optimal ROI
+        # max_iou = 0
+        # if self.optimal_rois:
+        #     for opt_roi in self.optimal_rois:
+        #         iou = self._calculate_iou(last_bbox, opt_roi)
+        #         max_iou = max(max_iou, iou)
+        
+        # # Remove the bbox
+        if self.bboxes:
+            self.bboxes.pop()
+        return 0.0
+        
+        # if max_iou < 0.0:
+        #     # Small reward for removing a box that doesn't match any optimal ROI
+        #     return 0.2
+        # else:
+        #     # Penalty proportional to how good the box was
+        #     # The penalty is doubled for high IoU boxes, as specified
+        #     return -max_iou * 2
 
     def _dist_to_nearest_unmatched_opt_roi(self, bbox):
         """
@@ -520,8 +565,8 @@ class ROIDetectionEnv(gym.Env):
         # overlap_penalty = self._calculate_roi_overlap_penalty(self.bboxes)
         
         # Weights for different components
-        coverage_weight = 70.0     # Highest priority: cover all annotations
-        matching_weight = 30.0     # Important: match optimal placement
+        coverage_weight = 80.0     # Highest priority: cover all annotations
+        matching_weight = 20.0     # Important: match optimal placement
         # efficiency_weight = 15.0   # Somewhat important: use right number of ROIs
         # overlap_penalty_weight = 5  # Penalize excessive overlap
         

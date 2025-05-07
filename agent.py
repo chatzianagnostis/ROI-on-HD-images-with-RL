@@ -67,13 +67,18 @@ class ROIAgent:
         env,
         model_dir="models",
         log_dir="logs",
-        tensorboard_log="logs/tensorboard",
+        tensorboard_log=None,  # Changed to None by default - will use log_dir if not specified
         learning_rate=3e-4
     ):
         # Create directories
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
-        os.makedirs(tensorboard_log, exist_ok=True)
+        
+        # If tensorboard_log is not specified, use the log_dir
+        if tensorboard_log is None:
+            tensorboard_log = log_dir
+        else:
+            os.makedirs(tensorboard_log, exist_ok=True)
 
         # PPO hyperparameters - optimized for K-means based environment
         ppo_params = dict(
@@ -81,15 +86,15 @@ class ROIAgent:
             env=env,
             learning_rate=learning_rate,
             n_steps=512,
-            batch_size=10,
+            batch_size=64,
             n_epochs=10,
-            gamma=0.999,
+            gamma=0.995,
             gae_lambda=0.95,
-            ent_coef=1e-3,
+            ent_coef=0.005,
             clip_range=0.2,
             vf_coef = 0.5,
-            # max_grad_norm = 0.5,
-            # normalize_advantage = True,
+            max_grad_norm = 0.5,
+            normalize_advantage = True,
             verbose=2,
             tensorboard_log=tensorboard_log,
             policy_kwargs={
