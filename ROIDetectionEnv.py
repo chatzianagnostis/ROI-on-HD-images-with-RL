@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import gym
 from gym import spaces
 import cv2
@@ -103,58 +104,144 @@ class ROIDetectionEnv(gym.Env):
         
         self.current_sample['annotations'] = processed_annotations
 
+    def _get_action_mask(self) -> np.ndarray:
+        """ Computes the action mask for the current state. """
+        # Actions: 0:Up, 1:Down, 2:Left, 3:Right, 4:Place, 5:Remove, 6:End
+        mask = np.ones(self.action_space.n, dtype=np.int8) # Start with all actions allowed (1 = True)
+
+        # Check if bbox_size is valid before checking boundaries
+        if self.bbox_size is None or self.current_bbox is None:
+            print("Warning: bbox_size or current_bbox is None in _get_action_mask. Cannot mask actions reliably.")
+            # Return all actions enabled as a fallback, or handle error appropriately
+            return mask
+        if not (len(self.bbox_size) == 2 and len(self.current_bbox) == 4):
+             print("Warning: bbox_size or current_bbox has unexpected format. Cannot mask actions reliably.")
+             return mask
+
+        # --- Check Movement Boundaries ---
+        # If the bbox is already at the boundary, disable the corresponding move action
+        # Use a small tolerance epsilon if needed, otherwise exact check is fine
+        epsilon = 1e-6 # Optional tolerance
+        if self.current_bbox[1] <= epsilon: # At top boundary
+            mask[0] = 0 # Disable Move Up
+        if self.current_bbox[1] >= self.image_size[1] - self.bbox_size[1] - epsilon: # At bottom boundary
+            mask[1] = 0 # Disable Move Down
+        if self.current_bbox[0] <= epsilon: # At left boundary
+            mask[2] = 0 # Disable Move Left
+        if self.current_bbox[0] >= self.image_size[0] - self.bbox_size[0] - epsilon: # At right boundary
+            mask[3] = 0 # Disable Move Right
+
+        # --- Check Place Bbox Conditions (Action 4) ---
+        MAX_BBOXES = 100
+        IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
+        can_place = True
+        # Condition 1: Max boxes limit reached?
+        if len(self.bboxes) >= MAX_BBOXES:
+            can_place = False
+        else:
+            # Condition 2: Trying to place exactly on top of an existing one?
+            for existing_bbox in self.bboxes:
+                try: # Add error handling for IoU calculation
+                    iou = self._calculate_iou(self.current_bbox, existing_bbox)
+                    if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
+                        can_place = False
+                        break # Found an identical placement, no need to check further
+                except Exception as e:
+                     print(f"Warning: Error calculating IoU in _get_action_mask: {e}")
+                     # Decide how to handle: maybe disable placement for safety?
+                     # can_place = False
+                     # break
+                     pass # Or ignore this specific check
+
+        if not can_place:
+            mask[4] = 0 # Disable Place Bbox
+
+        # --- Check Remove Bbox Condition (Action 5) ---
+        if not self.bboxes: # If the list of placed bboxes is empty
+            mask[5] = 0 # Disable Remove Bbox
+
+        # --- End Episode (Action 6) ---
+        # This action is always allowed here (mask[6] remains 1)
+
+        return mask
+
     def step(self, action):
-        """Take a step in the environment based on the action (with reward shaping)"""
-        import time
-        
-        # Calculate potential before taking action
-        old_potential = self._potential_function(self.current_bbox)
-        
-        reward = 0
+        """Take a step in the environment based on the action"""
+        # Note: Potential based shaping is removed/commented out as per Stage 0 request
+        # old_potential = self._potential_function(self.current_bbox) # Removed for Stage 0
+
+        reward = 0.0
         done = False
-        info = {}
-        
-        # Check if time limit exceeded
+        info = {} # Initialize info dictionary
+        metrics = {} # Initialize metrics
+
+        # Check time limit
         elapsed_time = time.time() - self.start_time
         if elapsed_time > self.time_limit:
             done = True
-            reward, metrics = self._calculate_final_reward()
-            metrics['time'] = {
-                'elapsed': elapsed_time,
-                'limit': self.time_limit
-            }
-            info['metrics'] = metrics
-            return self._get_observation(), reward, done, info
-        
-        if action < 4:  # Move bbox
-            self._move_bbox(action)
-            
-            # # Calculate potential after moving
-            # new_potential = self._potential_function(self.current_bbox)
-            
-            # # Potential-based shaping: γΦ(s') - Φ(s)
-            # gamma = 0.995  # Match the discount factor used in PPO
-            # shaping_reward = gamma * new_potential - old_potential
-            
-            # # Apply shaping coefficient
-            # reward += shaping_reward * self.shaping_coeff
-            reward += 0.0
-            
-        elif action == 4:  # Place bbox
-            reward = self._place_bbox()
-        elif action == 5:  # Remove bbox
-            reward = self._remove_bbox()
-        else:  # End episode
-            done = True
-            reward, metrics = self._calculate_final_reward()
-            metrics['time'] = {
-                'elapsed': elapsed_time,
-                'limit': self.time_limit
-            }
-            info['metrics'] = metrics
-        
-        return self._get_observation(), reward, done, info
+            # Final reward calculation will happen below
+        else:
+            # --- Execute the chosen action ---
+            # Note: The action masking should prevent illegal actions from being passed here
+            # by the SB3 agent, but the internal logic might still have checks.
+            if action < 4:  # Move bbox
+                self._move_bbox(action)
+                # No intermediate reward for movement in Stage 0
+                reward = 0.0
+            elif action == 4:  # Place bbox
+                # _place_bbox now includes checks for max boxes and identical placement
+                # and returns 0.0 for Stage 0 reward
+                reward = self._place_bbox()
+            elif action == 5:  # Remove bbox
+                # _remove_bbox checks if bboxes list is empty
+                # and returns 0.0 for Stage 0 reward
+                reward = self._remove_bbox()
+            elif action == 6:  # End episode
+                done = True
+                # Final reward calculation will happen below
+            else:
+                 # Should not happen with Discrete(7) but good practice
+                 print(f"Warning: Invalid action received: {action}")
+                 # Decide on penalty or consequence? For now, do nothing.
+                 pass
 
+        # --- Calculate final reward if episode is done ---
+        if done:
+            try: # Add try-except for final reward calculation
+                 final_reward_value, metrics = self._calculate_final_reward()
+                 reward += final_reward_value # Add final reward to step reward
+                 metrics['time'] = {'elapsed': elapsed_time, 'limit': self.time_limit}
+                 info['metrics'] = metrics
+            except Exception as e:
+                 print(f"Error during final reward calculation: {e}")
+                 # Handle error case, maybe return a default reward/info
+                 # For now, info['metrics'] might be missing or incomplete
+                 reward += -10.0 # Assign a penalty if calculation failed
+
+        # --- Calculate Action Mask for the NEXT state ---
+        # The agent needs the mask for the state it lands *in*
+        # to decide the *next* action.
+        try: # Add try-except for mask calculation
+            next_action_mask = self._get_action_mask()
+            info['action_mask'] = next_action_mask
+        except Exception as e:
+            print(f"Error calculating action mask: {e}")
+            # If mask calculation fails, provide a default mask (all actions enabled)
+            # or handle the error more robustly depending on the cause.
+            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8)
+
+        # --- Return observation, reward, done, info ---
+        try: # Add try-except for getting observation
+             observation = self._get_observation()
+        except Exception as e:
+             print(f"Error getting observation: {e}")
+             # Handle error: Maybe return last known observation or a default?
+             # This could indicate a critical state error. For now, return None/empty.
+             # Returning None might cause SB3 to crash, so a placeholder might be better.
+             observation = self.observation_space.sample() # Return a sample observation as fallback
+
+        return observation, reward, done, info
+    
     def _get_observation(self):
         """Get the current observation"""
         image = self.current_image.copy()
@@ -220,7 +307,7 @@ class ROIDetectionEnv(gym.Env):
         
         # Προετοίμασε το κουτί που πρόκειται να τοποθετηθεί
         current_bbox_to_place = self.current_bbox.copy()        
-        
+
         # 2. Έλεγχος: Τοποθέτηση ακριβώς πάνω σε υπάρχον κουτί
         for existing_bbox in self.bboxes:
             iou = self._calculate_iou(current_bbox_to_place, existing_bbox)
@@ -242,7 +329,7 @@ class ROIDetectionEnv(gym.Env):
         #     reward = max_iou * max_iou * 10  #emphasize good matches
         #     return reward
         
-        return 0.0  # Neutral reward if no good match
+        # return 0.0  # Neutral reward if no good match
 
     def _remove_bbox(self):
         """
