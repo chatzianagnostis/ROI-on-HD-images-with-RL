@@ -208,19 +208,33 @@ class ROIDetectionEnv(gym.Env):
         #         return -0.2  # Penalty for overlap with existing boxes
         
         # Calculate max IoU with any optimal ROI
-        max_iou = 0
-        best_match_idx = None
+        MAX_BBOXES = 100
+        IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
+
+        # 1. Έλεγχος: Μέγιστος αριθμός κουτιών
+        if len(self.bboxes) >= MAX_BBOXES:
+            # Αν το όριο έχει επιτευχθεί, η ενέργεια δεν κάνει τίποτα
+            # και επιστρέφει ουδέτερη ανταμοιβή.
+            # print(f"DEBUG: Max boxes ({MAX_BBOXES}) reached. Place action ignored.") # Προαιρετικό μήνυμα
+            return 0.0
         
-        if self.optimal_rois:
-            for i, opt_roi in enumerate(self.optimal_rois):
-                iou = self._calculate_iou(self.current_bbox, opt_roi)
-                if iou > max_iou:
-                    max_iou = iou
-                    best_match_idx = i
+        # Προετοίμασε το κουτί που πρόκειται να τοποθετηθεί
+        current_bbox_to_place = self.current_bbox.copy()        
         
-        # Add the bbox to our collection
-        self.bboxes.append(self.current_bbox.copy())
-    
+        # 2. Έλεγχος: Τοποθέτηση ακριβώς πάνω σε υπάρχον κουτί
+        for existing_bbox in self.bboxes:
+            iou = self._calculate_iou(current_bbox_to_place, existing_bbox)
+            if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
+                # Αν η επικάλυψη είναι σχεδόν τέλεια, η ενέργεια δεν κάνει τίποτα
+                # και επιστρέφει ουδέτερη ανταμοιβή.
+                # print(f"DEBUG: Identical placement detected (IoU={iou:.2f}). Place action ignored.") # Προαιρετικό μήνυμα
+                return 0.0
+
+        # 3. Αν περάσουν όλοι οι έλεγχοι: Τοποθέτησε το κουτί
+        self.bboxes.append(current_bbox_to_place)
+
+        # 4. Επέστρεψε την ανταμοιβή για το Στάδιο 0
+        return 0.0 # Καμία ενδιάμεση ανταμοιβή για την τοποθέτηση στο Στάδιο 0
         # # Reward based on IoU with optimal ROIs
         # if max_iou > 0:
         #     # Scaling factor to make the reward meaningful

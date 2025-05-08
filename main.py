@@ -60,33 +60,34 @@ def main():
     
     # Create a CheckpointCallback
     checkpoint_callback = CheckpointCallback(
-        save_freq=15000,
+        save_freq=20000,
         save_path="models/checkpoints/",
         name_prefix="roi_model",
         verbose=2
     )
    
-    # Dynamic reward shaping callback
-    shaping_callback = DynamicRewardShapingCallback(
-        check_freq=15000,  # Check every 15000 steps
-        window_size=100,  # Use last 100 episodes
-        initial_coeff=0.01,  # Normal shaping strength 
-        boost_coeff=0.05,  # Boosted shaping strength
-        verbose=1  # Print when changing
-    )
+    # # Dynamic reward shaping callback
+    # shaping_callback = DynamicRewardShapingCallback(
+    #     check_freq=15000,  # Check every 15000 steps
+    #     window_size=100,  # Use last 100 episodes
+    #     initial_coeff=0.0,  # Normal shaping strength 
+    #     boost_coeff=0.0,  # Boosted shaping strength
+    #     verbose=1  # Print when changing
+    # )
     
     # Add our simple logger
     logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)  # Use the same log directory
 
     # Combine all callbacks
-    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
+    # callbacks = [checkpoint_callback, shaping_callback, logger_callback]
+    callbacks = [checkpoint_callback, logger_callback]
 
     # Train and save model
     print("\nTraining agent...")
     start_time = time.time()
     
     # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=1000000, callback=callbacks)
+    agent.train(total_timesteps=200000, callback=callbacks)
     
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")

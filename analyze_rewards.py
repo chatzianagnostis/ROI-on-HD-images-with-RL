@@ -1,23 +1,50 @@
 import os
 import json
 import glob
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
-def analyze_action_rewards(log_dir="logs"):
+def analyze_action_rewards(log_dir="logs", run_id=None):
     """
-    Analyze and visualize rewards per action from training logs
-    """
-    # Load epoch files
-    epoch_files = sorted(glob.glob(os.path.join(log_dir, "episode_*.json")))
+    Analyze and visualize rewards per action from training logs.
     
-    if not epoch_files:
-        print("No epoch data found. Run training first.")
+    Args:
+        log_dir: Base logs directory
+        run_id: Specific run ID to analyze (if None, will use the latest run)
+    """
+    # Find available run directories
+    run_dirs = sorted(glob.glob(os.path.join(log_dir, "runs", "run_*")))
+    
+    if not run_dirs:
+        print(f"No run directories found in {os.path.join(log_dir, 'runs')}.")
         return
     
-    # Load episode files to get per-step rewards
-    episode_files = sorted(glob.glob(os.path.join(log_dir, "episode_*.json")))
+    # Select the run directory to analyze
+    if run_id is not None:
+        # Find a specific run by partial ID match
+        matching_runs = [d for d in run_dirs if run_id in d]
+        if not matching_runs:
+            print(f"No runs matching ID '{run_id}' found.")
+            print("Available runs:")
+            for run_dir in run_dirs:
+                print(f"  {os.path.basename(run_dir)}")
+            return
+        run_dir = matching_runs[0]
+    else:
+        # Use the most recent run by default
+        run_dir = run_dirs[-1]
+    
+    print(f"Analyzing run: {os.path.basename(run_dir)}")
+    
+    # Find episode files in the ppo_ directory
+    ppo_dir = os.path.join(run_dir, "ppo_")
+    episode_files = sorted(glob.glob(os.path.join(ppo_dir, "episode_*.json")))
+    
+    if not episode_files:
+        print(f"No episode data found in {ppo_dir}")
+        return
     
     # Action names
     action_names = ["Move Up", "Move Down", "Move Left", "Move Right", 
@@ -35,8 +62,8 @@ def analyze_action_rewards(log_dir="logs"):
                 action_rewards[action].append(reward)
                 action_counts[action] += 1
     
-    # Create output directory
-    output_dir = "reward_analysis"
+    # Create output directory within the run folder
+    output_dir = os.path.join(run_dir, "reward_analysis")
     os.makedirs(output_dir, exist_ok=True)
     
     # Calculate reward statistics
@@ -121,56 +148,77 @@ def analyze_action_rewards(log_dir="logs"):
     
     # Track reward trends over episodes
     try:
-        epoch_trends = {action: [] for action in range(len(action_names))}
-        epoch_nums = []
+        # Prepare episode numbers and reward data
+        episode_nums = []
+        episode_rewards = []
+        action_trends = {action: [] for action in range(len(action_names))}
         
-        for epoch_file in epoch_files:
-            with open(epoch_file, 'r') as f:
-                epoch_data = json.load(f)
-                epoch_nums.append(epoch_data.get("epoch", 0))
+        for i, ep_file in enumerate(episode_files):
+            with open(ep_file, 'r') as f:
+                ep_data = json.load(f)
                 
-                # Get rewards per action
-                action_stats = epoch_data.get("action_reward_stats", {})
+                episode_nums.append(ep_data.get("episode", i))
+                episode_rewards.append(ep_data.get("total_reward", 0))
                 
+                # Collect rewards per action for this episode
+                ep_action_rewards = defaultdict(list)
+                
+                for action, reward in zip(ep_data.get("actions", []), ep_data.get("rewards", [])):
+                    ep_action_rewards[action].append(reward)
+                
+                # Calculate average reward per action for this episode
                 for action in range(len(action_names)):
-                    action_name = action_names[action]
-                    if action_name in action_stats and "avg_reward" in action_stats[action_name]:
-                        epoch_trends[action].append(action_stats[action_name]["avg_reward"])
+                    if action in ep_action_rewards and ep_action_rewards[action]:
+                        action_trends[action].append(np.mean(ep_action_rewards[action]))
                     else:
-                        # Use None for epochs without this action
-                        epoch_trends[action].append(None)
+                        action_trends[action].append(None)  # No data for this action
         
-        # Plot reward trends
+        # Plot overall episode reward trend
+        plt.figure(figsize=(12, 6))
+        plt.plot(episode_nums, episode_rewards, marker='o', linestyle='-', color='blue')
+        plt.title('Episode Total Reward Over Time')
+        plt.xlabel('Episode')
+        plt.ylabel('Total Reward')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        episode_trend_path = os.path.join(output_dir, "episode_reward_trend.png")
+        plt.savefig(episode_trend_path)
+        plt.close()
+        
+        # Plot reward trends per action
         plt.figure(figsize=(12, 6))
         
         for action in range(len(action_names)):
             # Filter out None values
-            valid_indices = [i for i, reward in enumerate(epoch_trends[action]) if reward is not None]
-            valid_epochs = [epoch_nums[i] for i in valid_indices]
-            valid_rewards = [epoch_trends[action][i] for i in valid_indices]
+            valid_indices = [i for i, reward in enumerate(action_trends[action]) if reward is not None]
+            valid_episodes = [episode_nums[i] for i in valid_indices]
+            valid_rewards = [action_trends[action][i] for i in valid_indices]
             
             if valid_rewards:  # Only plot if we have data
-                plt.plot(valid_epochs, valid_rewards, marker='o', linestyle='-', label=action_names[action])
+                plt.plot(valid_episodes, valid_rewards, marker='o', linestyle='-', label=action_names[action])
         
         plt.title('Average Reward Trends by Action')
-        plt.xlabel('Epoch')
+        plt.xlabel('Episode')
         plt.ylabel('Average Reward')
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
         
-        trend_plot_path = os.path.join(output_dir, "reward_trends.png")
-        plt.savefig(trend_plot_path)
+        action_trend_path = os.path.join(output_dir, "action_reward_trends.png")
+        plt.savefig(action_trend_path)
         plt.close()
         
-        print(f"  - {trend_plot_path}")
+        print(f"  - {episode_trend_path}")
+        print(f"  - {action_trend_path}")
     except Exception as e:
-        print(f"Could not generate trend plot: {e}")
+        print(f"Could not generate trend plots: {e}")
     
     # Create detailed report
     report_path = os.path.join(output_dir, "action_reward_report.txt")
     with open(report_path, 'w') as f:
-        f.write("ROI DETECTION AGENT - ACTION REWARD ANALYSIS\n")
+        f.write(f"ROI DETECTION AGENT - ACTION REWARD ANALYSIS\n")
+        f.write(f"Run: {os.path.basename(run_dir)}\n")
         f.write("=========================================\n\n")
         
         # Write summary stats
@@ -211,7 +259,42 @@ def analyze_action_rewards(log_dir="logs"):
         f.write("  * Overlap penalty (for excessive overlap between ROIs)\n")
     
     print(f"  - {report_path}")
+    
+    # Save a JSON version of the analysis
+    json_report_path = os.path.join(output_dir, "reward_analysis.json")
+    json_report = {
+        "run": os.path.basename(run_dir),
+        "episodes_analyzed": len(episode_files),
+        "actions": {}
+    }
+    
+    for action in range(len(action_names)):
+        rewards = action_rewards.get(action, [])
+        count = action_counts.get(action, 0)
+        
+        if count > 0:
+            json_report["actions"][action_names[action]] = {
+                "count": count,
+                "avg_reward": float(np.mean(rewards)),
+                "min_reward": float(np.min(rewards)),
+                "max_reward": float(np.max(rewards)),
+                "std_reward": float(np.std(rewards)),
+                "positive_pct": float(sum(1 for r in rewards if r > 0) / count * 100),
+                "zero_pct": float(sum(1 for r in rewards if r == 0) / count * 100),
+                "negative_pct": float(sum(1 for r in rewards if r < 0) / count * 100)
+            }
+    
+    with open(json_report_path, 'w') as f:
+        json.dump(json_report, f, indent=2)
+    
+    print(f"  - {json_report_path}")
+    
     return output_dir
 
 if __name__ == "__main__":
-    analyze_action_rewards()
+    parser = argparse.ArgumentParser(description="Analyze action rewards from training logs")
+    parser.add_argument("--log_dir", default="logs", help="Base log directory")
+    parser.add_argument("--run_id", default=None, help="Specific run ID to analyze (default: latest run)")
+    
+    args = parser.parse_args()
+    analyze_action_rewards(args.log_dir, args.run_id)
