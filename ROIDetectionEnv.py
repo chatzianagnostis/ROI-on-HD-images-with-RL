@@ -288,49 +288,61 @@ class ROIDetectionEnv(gym.Env):
                                      self.current_bbox[0] + step_size)
 
     def _place_bbox(self):
-        """Place the current bounding box and reward based on IoU with optimal ROIs"""
-        # # Check for overlap with existing bboxes
-        # for bbox in self.bboxes:
-        #     if self._calculate_iou(self.current_bbox, bbox) > 0.8:
-        #         return -0.2  # Penalty for overlap with existing boxes
-        
-        # Calculate max IoU with any optimal ROI
+        """
+        Place the current bounding box.
+        STAGE 1 LOGIC:
+        - Limits total boxes to MAX_BBOXES.
+        - Prevents placing almost exactly on top of an existing box.
+        - Intermediate reward based on IoU with optimal ROIs if placement is allowed.
+        """
         MAX_BBOXES = 100
         IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
 
-        # 1. Έλεγχος: Μέγιστος αριθμός κουτιών
+        # 1. Check: Max boxes reached?
+        # This check is also in _get_action_mask. If the mask works correctly,
+        # this part of _place_bbox might not be strictly necessary for preventing the action,
+        # but it's a good safeguard for the internal logic of what reward to return.
         if len(self.bboxes) >= MAX_BBOXES:
-            # Αν το όριο έχει επιτευχθεί, η ενέργεια δεν κάνει τίποτα
-            # και επιστρέφει ουδέτερη ανταμοιβή.
-            # print(f"DEBUG: Max boxes ({MAX_BBOXES}) reached. Place action ignored.") # Προαιρετικό μήνυμα
-            return 0.0
-        
-        # Προετοίμασε το κουτί που πρόκειται να τοποθετηθεί
-        current_bbox_to_place = self.current_bbox.copy()        
+            # print(f"DEBUG (_place_bbox): Max boxes ({MAX_BBOXES}) reached. No placement.")
+            return 0.0 # No placement occurs, neutral reward
 
-        # 2. Έλεγχος: Τοποθέτηση ακριβώς πάνω σε υπάρχον κουτί
+        current_bbox_to_place = self.current_bbox.copy()
+
+        # 2. Check: Placing exactly on top of existing?
+        # Again, the action mask should prevent this selection.
+        # This is a safeguard.
         for existing_bbox in self.bboxes:
             iou = self._calculate_iou(current_bbox_to_place, existing_bbox)
             if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
-                # Αν η επικάλυψη είναι σχεδόν τέλεια, η ενέργεια δεν κάνει τίποτα
-                # και επιστρέφει ουδέτερη ανταμοιβή.
-                # print(f"DEBUG: Identical placement detected (IoU={iou:.2f}). Place action ignored.") # Προαιρετικό μήνυμα
-                return 0.0
+                # print(f"DEBUG (_place_bbox): Identical placement (IoU >= {IDENTICAL_PLACEMENT_IOU_THRESHOLD}). No placement.")
+                return 0.0 # No placement occurs, neutral reward
 
-        # 3. Αν περάσουν όλοι οι έλεγχοι: Τοποθέτησε το κουτί
+        # --- Εφόσον οι παραπάνω έλεγχοι πέρασαν (ή η μάσκα εμπόδισε την κλήση αν παραβιάζονταν) ---
+        # --- Τώρα υλοποιούμε την τοποθέτηση και την ανταμοιβή του Σταδίου 1 ---
+
+        # 3. Add the box to the list of placed bboxes
         self.bboxes.append(current_bbox_to_place)
 
-        # 4. Επέστρεψε την ανταμοιβή για το Στάδιο 0
-        return 0.0 # Καμία ενδιάμεση ανταμοιβή για την τοποθέτηση στο Στάδιο 0
-        # # Reward based on IoU with optimal ROIs
-        # if max_iou > 0:
-        #     # Scaling factor to make the reward meaningful
-        #     # Higher IoU gives exponentially higher reward
-        #     reward = max_iou * max_iou * 10  #emphasize good matches
-        #     return reward
+        # 4. Calculate reward based on IoU with optimal ROIs (STAGE 1 LOGIC)
+        max_iou_with_optimal = 0.0
+        if self.optimal_rois: # Check if optimal_rois have been calculated
+            for opt_roi in self.optimal_rois:
+                iou = self._calculate_iou(current_bbox_to_place, opt_roi)
+                if iou > max_iou_with_optimal:
+                    max_iou_with_optimal = iou
         
-        # return 0.0  # Neutral reward if no good match
+        iou_threshold_positive = 0.3  # Threshold for "good" IoU
+        positive_reward_scale = 5.0   # Scaling for positive reward
+        penalty_bad_placement = -0.1  # Penalty for IoU below threshold
 
+        if max_iou_with_optimal > iou_threshold_positive:
+            # Positive reward scaled by how good the IoU is
+            reward = (max_iou_with_optimal * max_iou_with_optimal) * positive_reward_scale
+            return reward
+        else:
+            # Small penalty if the placed box doesn't match well with any optimal ROI
+            return penalty_bad_placement
+        
     def _remove_bbox(self):
         """
         Remove the last placed bounding box with smart rewards:
