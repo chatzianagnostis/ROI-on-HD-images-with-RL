@@ -37,8 +37,8 @@ class ROIDetectionEnv(gym.Env):
         # 6: End episode
         self.action_space = spaces.Discrete(7)
 
-        self.shaping_coeff = 0.01  # Coefficient for shaping reward (from script 2)
-        self.gamma_potential_shaping = 0.995 # Discount factor for potential shaping (from script 2)
+        self.shaping_coeff = 0.01  # Coefficient for shaping reward
+        self.gamma_potential_shaping = 0.995 # Discount factor for potential shaping
         
         # Observation space: image and current bbox state
         self.observation_space = spaces.Dict({
@@ -51,7 +51,6 @@ class ROIDetectionEnv(gym.Env):
 
     def reset(self):
         """Reset the environment with a new image"""
-        # import time # Moved to top-level import
         self.start_time = time.time()
         
         try:
@@ -76,8 +75,8 @@ class ROIDetectionEnv(gym.Env):
         self.bboxes = []
 
         # Initial bbox center
-        if self.bbox_size is None or not (len(self.bbox_size) == 2): # Should not happen if _get_bbox_size is correct
-             # Fallback if bbox_size is somehow not set, though _get_bbox_size should handle it
+        if self.bbox_size is None or not (len(self.bbox_size) == 2): 
+            # Fallback if bbox_size is somehow not set, though _get_bbox_size should handle it
             print("Warning: bbox_size is None or invalid in reset. Defaulting current_bbox.")
             self.current_bbox = [0,0, self.crop_size[0] // 10, self.crop_size[1] // 10] # Arbitrary small default
         else:
@@ -117,54 +116,65 @@ class ROIDetectionEnv(gym.Env):
 
     def _get_action_mask(self) -> np.ndarray:
         """ Computes the action mask for the current state. """
-        mask = np.ones(self.action_space.n, dtype=np.int8) 
+        mask = np.ones(self.action_space.n, dtype=np.int8) # Start with all actions allowed (1 = True)
 
         if self.bbox_size is None or self.current_bbox is None:
             print("Warning: bbox_size or current_bbox is None in _get_action_mask. Cannot mask actions reliably.")
-            return mask
+            return mask # Return all actions enabled as a fallback
         if not (len(self.bbox_size) == 2 and len(self.current_bbox) == 4):
             print("Warning: bbox_size or current_bbox has unexpected format. Cannot mask actions reliably.")
-            return mask
+            return mask # Return all actions enabled
 
-        epsilon = 1e-6 
-        if self.current_bbox[1] <= epsilon: 
-            mask[0] = 0 
-        if self.current_bbox[1] >= self.image_size[1] - self.bbox_size[1] - epsilon: 
-            mask[1] = 0 
-        if self.current_bbox[0] <= epsilon: 
-            mask[2] = 0 
-        if self.current_bbox[0] >= self.image_size[0] - self.bbox_size[0] - epsilon: 
-            mask[3] = 0 
+        # --- Check Movement Boundaries ---
+        epsilon = 1e-6 # Optional tolerance for floating point comparisons
+        if self.current_bbox[1] <= epsilon: # At top boundary
+            mask[0] = 0 # Disable Move Up
+        if self.current_bbox[1] >= self.image_size[1] - self.bbox_size[1] - epsilon: # At bottom boundary
+            mask[1] = 0 # Disable Move Down
+        if self.current_bbox[0] <= epsilon: # At left boundary
+            mask[2] = 0 # Disable Move Left
+        if self.current_bbox[0] >= self.image_size[0] - self.bbox_size[0] - epsilon: # At right boundary
+            mask[3] = 0 # Disable Move Right
 
+        # --- Check Place Bbox Conditions (Action 4) ---
         MAX_BBOXES = 100
         IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
         can_place = True
-        if len(self.bboxes) >= MAX_BBOXES:
+        if len(self.bboxes) >= MAX_BBOXES: # Condition 1: Max boxes limit reached?
             can_place = False
         else:
+            # Condition 2: Trying to place exactly on top of an existing one?
             for existing_bbox in self.bboxes:
                 try: 
                     iou = self._calculate_iou(self.current_bbox, existing_bbox)
                     if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
                         can_place = False
-                        break 
+                        break # Found an identical placement, no need to check further
                 except Exception as e:
                     print(f"Warning: Error calculating IoU in _get_action_mask: {e}")
-                    pass 
+                    pass # Or ignore this specific check, or decide to disable placement for safety
         if not can_place:
-            mask[4] = 0 
+            mask[4] = 0 # Disable Place Bbox
 
-        if not self.bboxes: 
-            mask[5] = 0 
+        # --- Check Remove Bbox Condition (Action 5) ---
+        if not self.bboxes: # If the list of placed bboxes is empty
+            mask[5] = 0 # Disable Remove Bbox
+
+        # --- End Episode (Action 6) ---
+        # This action is typically always allowed (mask[6] remains 1)
         return mask
+
+    def action_masks(self) -> np.ndarray:
+        """
+        Returns the valid action mask for the current state.
+        This is required by MaskablePPO.
+        """
+        return self._get_action_mask()
 
     def step(self, action):
         """Take a step in the environment based on the action (with reward shaping)"""
-        # import time # Moved to top-level import
-        
-        # Calculate potential before taking action (for movement actions)
         old_potential = 0.0
-        if action < 4: # Only calculate for move actions
+        if action < 4: # Only calculate potential for move actions
              old_potential = self._potential_function(self.current_bbox)
         
         reward = 0.0 # Initialize step reward
@@ -175,8 +185,9 @@ class ROIDetectionEnv(gym.Env):
         elapsed_time = time.time() - self.start_time
         if elapsed_time > self.time_limit:
             done = True
-            # Final reward calculation will happen below
+            # Final reward calculation will happen below if episode ends due to time limit
         else:
+            # Execute the chosen action
             if action < 4:  # Move bbox
                 self._move_bbox(action)
                 new_potential = self._potential_function(self.current_bbox)
@@ -188,33 +199,41 @@ class ROIDetectionEnv(gym.Env):
                 reward = self._remove_bbox() # Get immediate reward from removing
             elif action == 6:  # End episode
                 done = True
-                # Final reward calculation will happen below
+                # Final reward calculation will happen below if episode ends by agent's choice
             else:
                 print(f"Warning: Invalid action received: {action}")
+                # No explicit penalty for invalid action here, as it should be masked
                 pass
 
+        # Calculate final reward if episode is done (either by time or action 6)
         if done:
             try: 
-                final_reward_value, metrics = self._calculate_final_reward()
-                reward += final_reward_value # Add final reward to any step reward (e.g. if ended by action)
+                final_reward_value, metrics_from_final_reward = self._calculate_final_reward()
+                reward += final_reward_value # Add final reward to any existing step reward
+                metrics.update(metrics_from_final_reward) # Merge metrics
                 metrics['time'] = {'elapsed': elapsed_time, 'limit': self.time_limit}
                 info['metrics'] = metrics
             except Exception as e:
                 print(f"Error during final reward calculation: {e}")
-                reward += -10.0 # Fallback penalty
+                reward += -10.0 # Fallback penalty if final reward calculation fails
+                info['metrics'] = metrics # metrics might be partially filled or empty
 
+        # Get action mask for the *next* state (required by some SB3 algorithms, good practice)
+        # MaskablePPO will use the action_masks() method directly during its own step.
+        # However, returning it in info is still a common pattern.
         try: 
-            next_action_mask = self._get_action_mask()
+            next_action_mask = self._get_action_mask() # or self.action_masks()
             info['action_mask'] = next_action_mask
         except Exception as e:
-            print(f"Error calculating action mask: {e}")
-            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8)
+            print(f"Error calculating action mask for info: {e}")
+            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8) # Default: all actions enabled
 
+        # Get observation for the next state
         try: 
             observation = self._get_observation()
         except Exception as e:
             print(f"Error getting observation: {e}")
-            observation = self.observation_space.sample() 
+            observation = self.observation_space.sample() # Return a sample observation as fallback
 
         return observation, reward, done, info
     
@@ -222,11 +241,12 @@ class ROIDetectionEnv(gym.Env):
         """Get the current observation"""
         image = self.current_image.copy()
         
+        # Draw all placed bboxes
         for bbox in self.bboxes:
             cv2.rectangle(image, 
                           (int(bbox[0]), int(bbox[1])), 
                           (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])),
-                          (0, 255, 0), 2)
+                          (0, 255, 0), 2) # Green
         
         # Ensure current_bbox and its components are valid before drawing
         if self.current_bbox and len(self.current_bbox) == 4:
@@ -234,17 +254,17 @@ class ROIDetectionEnv(gym.Env):
                          (int(self.current_bbox[0]), int(self.current_bbox[1])),
                          (int(self.current_bbox[0] + self.current_bbox[2]), 
                           int(self.current_bbox[1] + self.current_bbox[3])),
-                         (255, 0, 0), 2)
+                         (255, 0, 0), 2) # Blue (movable)
         
         bbox_state = np.zeros((100, 4), dtype=np.float32) # Ensure dtype for observation space
         for i, bbox in enumerate(self.bboxes):
-            if i < 100:
+            if i < 100: # Max 100 bboxes
                 bbox_state[i] = [
                     bbox[0]/self.image_size[0], 
                     bbox[1]/self.image_size[1],
                     bbox[2]/self.image_size[0],
                     bbox[3]/self.image_size[1]
-                ]
+                ] # Normalize bbox coordinates
         
         return {
             'image': image.astype(np.uint8), # Ensure dtype for observation space
@@ -274,40 +294,38 @@ class ROIDetectionEnv(gym.Env):
     def _place_bbox(self):
         """
         Place the current bounding box.
-        Logic based on script 1 (safeguards, Stage 2 overlap adds box then penalizes).
-        Reward values/scaling for IoU part from script 2.
+        Logic includes safeguards and overlap checks.
+        Reward is based on IoU with optimal ROIs.
         """
         MAX_BBOXES = 100
         IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
         current_bbox_to_place = self.current_bbox.copy()
 
-        # Safeguard 1: Max boxes reached? (Logic from script 1)
-        # This should ideally be caught by action mask, but as a safeguard:
+        # Safeguard 1: Max boxes reached?
         if len(self.bboxes) >= MAX_BBOXES:
-            return 0.0 # Neutral reward as it's an invalid state not a strategic error
+            return 0.0 # Neutral reward as this should ideally be caught by action mask
 
-        # Safeguard 2: Placing exactly on top of existing? (Logic from script 1)
+        # Safeguard 2: Placing almost exactly on top of an existing bbox?
         for existing_bbox in self.bboxes:
             iou = self._calculate_iou(current_bbox_to_place, existing_bbox)
             if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
-                return -0.2 # Penalty from script 1 (consistent with script 2 overlap)
+                return -0.2 # Penalty for identical placement
 
-        # --- Overlap Check (Logic from Script 1's "Stage 2") ---
-        # Script 1's "Stage 2" logic: if significant overlap, add box, then return penalty.
-        overlap_threshold_script1 = 0.8 
-        overlap_penalty_script1 = -0.2 
+        # Overlap Check (as per original logic from script 1):
+        # If significant overlap, add box, then return penalty.
+        overlap_threshold_significant = 0.8 
+        overlap_penalty_significant = -0.2 
 
         for existing_bbox in self.bboxes: 
             iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
-            if iou_with_existing > overlap_threshold_script1:
-                self.bboxes.append(current_bbox_to_place) # Script 1 logic: Add box
-                return overlap_penalty_script1          # Return penalty
+            if iou_with_existing > overlap_threshold_significant:
+                self.bboxes.append(current_bbox_to_place) # Add box despite overlap
+                return overlap_penalty_significant          # Return penalty
 
-        # If no significant overlap found by the loop above (it would have returned),
-        # then add the box and calculate IoU-based reward.
+        # If no significant overlap (that triggers immediate return) was found, add the box.
         self.bboxes.append(current_bbox_to_place)
 
-        # --- IoU-based reward (Reward values/scaling from Script 2) ---
+        # IoU-based reward calculation (rewards from script 2's logic)
         max_iou_with_optimal = 0.0
         if self.optimal_rois:
             for opt_roi in self.optimal_rois:
@@ -315,47 +333,40 @@ class ROIDetectionEnv(gym.Env):
                 if iou > max_iou_with_optimal:
                     max_iou_with_optimal = iou
         
-        # Reward calculation using Script 2's values:
-        if max_iou_with_optimal > 0: # Script 2 condition for positive reward
-            reward = (max_iou_with_optimal * max_iou_with_optimal) * 10.0 # Script 2 reward scaling
+        if max_iou_with_optimal > 0: 
+            reward = (max_iou_with_optimal * max_iou_with_optimal) * 10.0 
             return reward
         else:
-            return 0.0 # Script 2 neutral reward if no good match / IoU is 0
+            return 0.0 # Neutral reward if no good match / IoU is 0
         
     def _remove_bbox(self):
         """
         Remove the last placed bounding box.
-        Logic: Pop if exists.
-        Rewards based on script 2's smart rewards.
+        Rewards encourage removing "bad" boxes and penalize removing "good" boxes.
         """
         if not self.bboxes:
-            return -0.1  # Reward from script 2: Penalty for trying to remove when no bbox exists
+            return -0.1  # Penalty for trying to remove when no bbox exists
         
         last_bbox = self.bboxes[-1]
         
-        max_iou = 0.0
+        max_iou = 0.0 # Max IoU of the removed box with any optimal ROI
         if self.optimal_rois:
             for opt_roi in self.optimal_rois:
                 iou = self._calculate_iou(last_bbox, opt_roi)
                 max_iou = max(max_iou, iou)
         
-        self.bboxes.pop() # Logic: Remove the bbox
+        self.bboxes.pop() # Remove the bbox
         
-        # Rewards from script 2 (adjusted condition for clarity):
-        # Script 2 had `if max_iou < 0.0:`, which is unlikely for IoU.
-        # Assuming it meant a very low IoU indicates a "low-quality" box.
-        low_quality_threshold = 0.05 # Example threshold for a "bad" box
+        low_quality_threshold = 0.05 # Threshold to consider a box "low quality"
         if max_iou < low_quality_threshold: 
-            return 0.2  # Reward from script 2 for removing a low-quality box
+            return 0.2  # Reward for removing a low-quality box
         else:
-            # Penalty proportional to how good the box was (from script 2)
-            return -max_iou * 2.0
-
+            return -max_iou * 2.0 # Penalty for removing a good box, proportional to its quality
+            
     def _dist_to_nearest_unmatched_opt_roi(self, bbox):
         """
         Calculate the minimum Manhattan distance from the center of the current bbox
-        to the center of any optimal ROI that hasn't been matched yet.
-        (Using version from script 1 - identical logic to script 2)
+        to the center of any optimal ROI that hasn't been matched yet by a *placed* bbox.
         """
         if not self.optimal_rois:
             return 0.0
@@ -363,84 +374,92 @@ class ROIDetectionEnv(gym.Env):
         bbox_cx = bbox[0] + bbox[2] / 2.0
         bbox_cy = bbox[1] + bbox[3] / 2.0
         
-        matched_opt_rois_indices = [] # Store indices of matched optimal ROIs
-        
-        for placed_bbox in self.bboxes:
-            best_iou = 0.0
-            best_match_idx = -1 # Use -1 to indicate no match found yet for this placed_bbox
+        # Identify indices of optimal ROIs already "matched" by one of the self.bboxes
+        matched_opt_rois_indices = [] 
+        temp_optimal_rois_for_matching = list(enumerate(self.optimal_rois))
+
+        for placed_bbox_in_list in self.bboxes: # Check against already placed bboxes
+            best_iou_for_placed = 0.0
+            best_match_opt_idx = -1
             
-            for i, roi in enumerate(self.optimal_rois):
-                if i in matched_opt_rois_indices: # Skip if this optimal ROI is already matched by another placed_bbox
+            for i, opt_roi_data in temp_optimal_rois_for_matching:
+                if i in matched_opt_rois_indices: # If this optimal ROI is already claimed
                     continue
-                iou = self._calculate_iou(placed_bbox, roi)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_match_idx = i
+                iou = self._calculate_iou(placed_bbox_in_list, opt_roi_data)
+                if iou > best_iou_for_placed:
+                    best_iou_for_placed = iou
+                    best_match_opt_idx = i # Store index of the optimal ROI
             
-            if best_match_idx != -1 and best_iou > 0.1: # If a good match is found for placed_bbox
-                if best_match_idx not in matched_opt_rois_indices: # ensure we don't add duplicates if multiple placed_bboxes match the same optimal_roi
-                    matched_opt_rois_indices.append(best_match_idx)
+            if best_match_opt_idx != -1 and best_iou_for_placed > 0.1: # If a good match is found
+                if best_match_opt_idx not in matched_opt_rois_indices:
+                    matched_opt_rois_indices.append(best_match_opt_idx)
         
         min_dist = float('inf')
-        unmatched_found = False
+        unmatched_roi_exists = False
         for i, roi in enumerate(self.optimal_rois):
-            if i in matched_opt_rois_indices:
+            if i in matched_opt_rois_indices: # Skip optimal ROIs that are already matched
                 continue
-            unmatched_found = True
+            unmatched_roi_exists = True # Found at least one unmatched optimal ROI
             roi_cx = roi[0] + roi[2] / 2.0
             roi_cy = roi[1] + roi[3] / 2.0
-            dist = abs(bbox_cx - roi_cx) + abs(bbox_cy - roi_cy)
+            dist = abs(bbox_cx - roi_cx) + abs(bbox_cy - roi_cy) # Manhattan distance
             min_dist = min(min_dist, dist)
         
-        if not unmatched_found: # All optimal ROIs are matched
-            return 0.0
+        if not unmatched_roi_exists: # All optimal ROIs are currently matched by placed bboxes
+            return 0.0 # No distance penalty needed, or agent should place to cover new areas if logic allows
         
-        return min_dist if min_dist != float('inf') else 0.0
-
+        return min_dist if min_dist != float('inf') else 0.0 # Return 0 if somehow no unmatched ROIs found but min_dist is inf
 
     def _potential_function(self, bbox):
         """
         Potential function for reward shaping.
-        Returns a higher value when closer to an unmatched optimal ROI.
-        (Using version from script 1 - slightly more robust jitter seed)
+        Returns a higher value when closer to an unmatched optimal ROI. Includes jitter.
         """
         distance = self._dist_to_nearest_unmatched_opt_roi(bbox)
         
-        jitter_seed = int(bbox[0] * 1000 + bbox[1])
-        jitter_seed = abs(int(jitter_seed)) % (2**32)
-        rng = np.random.RandomState(jitter_seed) # Corrected: was np.random.Randomstate
-        jitter_scale = min(self.image_size) * 0.005  
+        # Seeded random for consistent jitter based on bbox position
+        jitter_seed = int(bbox[0] * 1000 + bbox[1]) # Simple hash of position
+        jitter_seed = abs(int(jitter_seed)) % (2**32) # Ensure positive seed within RNG limits
+        rng = np.random.RandomState(jitter_seed) 
+        jitter_scale = min(self.image_size[0], self.image_size[1]) * 0.005  # Reduced jitter scale
         jitter = rng.normal(0, jitter_scale)
         
+        # Potential is higher (less negative) when distance is smaller
         return -distance + jitter
 
     def _calculate_iou(self, box1, box2):
-        """Calculate IoU between two bounding boxes"""
+        """Calculate IoU between two bounding boxes [x, y, w, h]"""
         box1_x1, box1_y1 = box1[0], box1[1]
         box1_x2, box1_y2 = box1[0] + box1[2], box1[1] + box1[3]
         
         box2_x1, box2_y1 = box2[0], box2[1]
         box2_x2, box2_y2 = box2[0] + box2[2], box2[1] + box2[3]
         
+        # Calculate intersection coordinates
         x_left = max(box1_x1, box2_x1)
         y_top = max(box1_y1, box2_y1)
         x_right = min(box1_x2, box2_x2)
         y_bottom = min(box1_y2, box2_y2)
         
-        if x_right < x_left or y_bottom < y_top:
+        if x_right < x_left or y_bottom < y_top: # No overlap
             return 0.0
             
         intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        box1_area = (box1_x2 - box1_x1) * (box1_y2 - box1_y1)
-        box2_area = (box2_x2 - box2_x1) * (box2_y2 - box2_y1)
+        
+        box1_area = box1[2] * box1[3] # w * h
+        box2_area = box2[2] * box2[3] # w * h
+        
         union_area = box1_area + box2_area - intersection_area
         
         if union_area == 0: # Avoid division by zero
             return 0.0
-        return intersection_area / union_area
+        
+        iou = intersection_area / union_area
+        return iou
 
     def _scale_bbox_to_original(self, bbox):
         """Scale a bbox from the resized image back to the original image dimensions"""
+        if 'scale_factors' not in self.current_sample: return bbox # Should not happen
         scale_factors = self.current_sample['scale_factors']
         original_bbox = [
             int(bbox[0] / scale_factors[0]),
@@ -453,225 +472,228 @@ class ROIDetectionEnv(gym.Env):
     def _calculate_optimal_rois(self):
         """
         KMeans-based ROI discovery under L∞ constraint.
+        Determines a "reasonable" set of target ROIs based on annotation clustering.
         """
-        annotations = self.current_sample.get('annotations', []) # Handle missing annotations
-        if not annotations: # No annotations, place a single ROI in the center
-            H, W = self.current_image.shape[:2]
-            roi_w, roi_h = self.bbox_size if self.bbox_size else self.crop_size # Fallback
-            half_w, half_h = roi_w / 2.0, roi_h / 2.0
-            cx, cy = W / 2.0, H / 2.0
-            return [[max(0, cx - half_w), max(0, cy - half_h), roi_w, roi_h]]
-
-
-        H, W = self.current_image.shape[:2]
-        # Ensure bbox_size is valid
+        annotations = self.current_sample.get('annotations', [])
+        
         if self.bbox_size is None or len(self.bbox_size) != 2:
-             print("Warning: bbox_size invalid in _calculate_optimal_rois. Using crop_size as fallback.")
-             # Fallback to crop_size if bbox_size is not set, though it should be from reset
-             # This might lead to ROIs not matching the agent's movable bbox size if crop_size is original scale
-             # A better fallback might be to estimate from annotations if possible or use a default fraction of image size
-             self.bbox_size = self.crop_size # This assumes crop_size is on the resized scale, which might be incorrect.
-                                             # For safety, _get_bbox_size should always run first.
+             print("Critical Warning: bbox_size is not set in _calculate_optimal_rois. Optimal ROIs might be incorrect.")
+             # Attempt a fallback, but this indicates an issue in the reset/init flow
+             self.bbox_size = self._get_bbox_size() # Try to get it again
+             if self.bbox_size is None: # If still None, use a very rough default
+                 self.bbox_size = (self.crop_size[0]*0.1, self.crop_size[1]*0.1)
+
+
         roi_w, roi_h = self.bbox_size
-        half_w, half_h = roi_w/2.0, roi_h/2.0
-        
-        def clamp(val, lo, hi):
-            return max(lo, min(val, hi))
+        half_w, half_h = roi_w / 2.0, roi_h / 2.0
+        H, W = self.current_image.shape[:2]
+
+        if not annotations: # If no annotations, create a single ROI in the center of the image
+            cx, cy = W / 2.0, H / 2.0
+            # Clamp to ensure ROI is within image boundaries
+            x0 = max(0, cx - half_w)
+            y0 = max(0, cy - half_h)
+            # Ensure width/height don't exceed image dimensions if ROI is placed at edge
+            clamped_w = min(roi_w, W - x0)
+            clamped_h = min(roi_h, H - y0)
+            return [[x0, y0, clamped_w, clamped_h]]
+
+        def clamp_center(val, half_dim, total_dim): # Clamps center coordinate
+            return max(half_dim, min(val, total_dim - half_dim))
             
-        pts = []
+        pts = [] # Collect annotation centers
         for ann in annotations:
-            x, y, w, h_ann = ann['bbox'] # Renamed h to h_ann to avoid conflict
-            pts.append((x + w/2.0, y + h_ann/2.0))
+            x, y, w_ann, h_ann = ann['bbox']
+            pts.append((x + w_ann / 2.0, y + h_ann / 2.0))
         
-        if not pts: # Should be caught by the first check, but as a safeguard
+        if not pts: # Should have been caught by `if not annotations`
              cx, cy = W/2.0, H/2.0
-             return [[max(0, cx - half_w), max(0, cy - half_h), roi_w, roi_h]]
-        if len(pts) == 1:
+             x0 = max(0, cx - half_w); y0 = max(0, cy - half_h)
+             return [[x0, y0, min(roi_w, W-x0), min(roi_h, H-y0)]]
+        if len(pts) == 1: # Single annotation, create one ROI centered on it
             cx, cy = pts[0]
-            cx = clamp(cx, half_w, W - half_w)
-            cy = clamp(cy, half_h, H - half_h)
-            return [[cx - half_w, cy - half_h, roi_w, roi_h]]
+            cx = clamp_center(cx, half_w, W)
+            cy = clamp_center(cy, half_h, H)
+            x0 = cx - half_w; y0 = cy - half_h
+            return [[x0, y0, roi_w, roi_h]] # Assuming roi_w, roi_h fit
             
-        pts = np.array(pts)
+        pts_np = np.array(pts)
         
-        best_k = len(pts)
-        best_centers = pts # Default to each point being a center if no k works
-        
-        for k_clusters in range(1, len(pts)+1): # Renamed k to k_clusters
-            if len(pts) < k_clusters:
+        best_k = len(pts_np) # Max possible clusters is number of points
+        best_centers = pts_np # Default: each annotation is its own cluster center
+
+        for k_val in range(1, len(pts_np) + 1): 
+            if len(pts_np) < k_val: # Cannot have more clusters than points
                 continue
             
-            # Kmeans can fail with n_samples < n_clusters. Added explicit check.
-            # n_init='auto' is recommended for scikit-learn >= 1.4, otherwise 10 is default.
-            # For older versions, explicitly set n_init=10 or handle the warning.
-            try:
-                km = KMeans(n_clusters=k_clusters, random_state=0, n_init='auto').fit(pts)
-            except ValueError as e:
-                # Handle cases where KMeans might fail (e.g. not enough distinct samples for k_clusters)
-                # print(f"KMeans failed for k={k_clusters} with error: {e}. Skipping this k.")
-                if k_clusters == 1 and len(pts) >=1: # If k=1 fails, something is very wrong or pts is empty
-                     # Fallback to average of all points for k=1 if it fails
-                     center = np.mean(pts, axis=0, keepdims=True)
-                     best_centers = center
-                     best_k = 1
-                     break # Found a fallback for k=1
-                continue # Try next k or rely on default best_centers=pts
+            try: # n_init='auto' is default in newer sklearn, otherwise set to 10
+                km = KMeans(n_clusters=k_val, random_state=0, n_init='auto').fit(pts_np)
+            except ValueError: # Kmeans can fail if k_val is too large for distinct points
+                if k_val == 1 and len(pts_np) >=1: # Fallback for k=1 if it fails
+                     best_centers = np.mean(pts_np, axis=0, keepdims=True)
+                     best_k = 1; break 
+                continue 
 
-            centers = km.cluster_centers_
+            current_centers = km.cluster_centers_
             labels = km.labels_
             
-            good = True
-            for ci in range(k_clusters):
-                cx, cy = centers[ci]
-                members = pts[labels == ci] # More efficient way to get members
-                if not members.any(): 
+            is_good_k = True # Assume this k is good until proven otherwise
+            for cluster_idx in range(k_val):
+                cluster_center_x, cluster_center_y = current_centers[cluster_idx]
+                member_points = pts_np[labels == cluster_idx]
+                
+                if not member_points.any(): # Skip empty clusters
                     continue
                 
-                max_dx = np.max(np.abs(members[:, 0] - cx)) if members.size > 0 else 0
-                max_dy = np.max(np.abs(members[:, 1] - cy)) if members.size > 0 else 0
+                # Check L-infinity radius for this cluster
+                max_delta_x = np.max(np.abs(member_points[:, 0] - cluster_center_x))
+                max_delta_y = np.max(np.abs(member_points[:, 1] - cluster_center_y))
 
-                if max_dx > half_w or max_dy > half_h:
-                    good = False
-                    break
+                if max_delta_x > half_w or max_delta_y > half_h: # If any point is outside ROI half-dims
+                    is_good_k = False
+                    break # This k is not good, try next k
             
-            if good:
-                best_k = k_clusters
-                best_centers = centers
-                break # Found the minimal k
+            if is_good_k: # Found the minimal k that satisfies the L-infinity constraint
+                best_k = k_val
+                best_centers = current_centers
+                break 
         
-        rois = []
-        # Ensure best_centers is not None and is iterable
+        final_rois = []
         if best_centers is not None and len(best_centers) > 0 :
-            for (cx, cy) in best_centers:
-                cx = clamp(cx, half_w, W - half_w)
-                cy = clamp(cy, half_h, H - half_h)
-                x0, y0 = cx - half_w, cy - half_h
-                rois.append([x0, y0, roi_w, roi_h])
-        else: # Fallback if best_centers is somehow empty or None
-             cx_fallback, cy_fallback = W/2.0, H/2.0
-             rois.append([max(0, cx_fallback - half_w), max(0, cy_fallback - half_h), roi_w, roi_h])
+            for (center_x, center_y) in best_centers:
+                # Clamp cluster centers so the resulting ROI is within image bounds
+                clamped_center_x = clamp_center(center_x, half_w, W)
+                clamped_center_y = clamp_center(center_y, half_h, H)
+                
+                x0 = clamped_center_x - half_w
+                y0 = clamped_center_y - half_h
+                # Ensure x0,y0 are not negative due to clamping very close to edge
+                x0 = max(0, x0)
+                y0 = max(0, y0)
 
-        return rois
+                final_rois.append([x0, y0, roi_w, roi_h])
+        else: # Fallback if best_centers is empty (should not happen if annotations exist)
+             cx_fb, cy_fb = W/2.0, H/2.0
+             x0_fb = max(0, cx_fb - half_w); y0_fb = max(0, cy_fb - half_h)
+             final_rois.append([x0_fb, y0_fb, min(roi_w, W-x0_fb), min(roi_h, H-y0_fb)])
+        return final_rois
 
-
-    def _is_bbox_contained(self, bbox1, bbox2, threshold=0.8):
-        """Check if bbox1 is mostly contained within bbox2"""
-        bbox1_x1, bbox1_y1 = bbox1[0], bbox1[1]
-        bbox1_x2, bbox1_y2 = bbox1[0] + bbox1[2], bbox1[1] + bbox1[3]
+    def _is_bbox_contained(self, bbox1_ann, bbox2_roi, threshold=0.8):
+        """Check if bbox1_ann (annotation) is mostly contained within bbox2_roi (ROI)"""
+        b1_x1, b1_y1, b1_w, b1_h = bbox1_ann
+        b1_x2, b1_y2 = b1_x1 + b1_w, b1_y1 + b1_h
         
-        bbox2_x1, bbox2_y1 = bbox2[0], bbox2[1]
-        bbox2_x2, bbox2_y2 = bbox2[0] + bbox2[2], bbox2[1] + bbox2[3]
+        b2_x1, b2_y1, b2_w, b2_h = bbox2_roi
+        b2_x2, b2_y2 = b2_x1 + b2_w, b2_y1 + b2_h
         
-        x_left = max(bbox1_x1, bbox2_x1)
-        y_top = max(bbox1_y1, bbox2_y1)
-        x_right = min(bbox1_x2, bbox2_x2)
-        y_bottom = min(bbox1_y2, bbox2_y2)
+        # Calculate intersection area
+        inter_x1 = max(b1_x1, b2_x1)
+        inter_y1 = max(b1_y1, b2_y1)
+        inter_x2 = min(b1_x2, b2_x2)
+        inter_y2 = min(b1_y2, b2_y2)
         
-        if x_right < x_left or y_bottom < y_top:
+        inter_w = max(0, inter_x2 - inter_x1)
+        inter_h = max(0, inter_y2 - inter_y1)
+        intersection_area = inter_w * inter_h
+        
+        if intersection_area == 0: # No overlap
             return False
                 
-        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        bbox1_area = (bbox1_x2 - bbox1_x1) * (bbox1_y2 - bbox1_y1)
+        bbox1_area = b1_w * b1_h
         
         if bbox1_area == 0: # Avoid division by zero if annotation area is zero
              return False 
-        return intersection_area / bbox1_area >= threshold
+        # Return true if intersection covers at least `threshold` of bbox1_ann's area
+        return (intersection_area / bbox1_area) >= threshold
 
-    def _calculate_annotation_coverage(self, rois, annotations):
-        """Calculate how many annotations are properly covered by at least one ROI"""
-        covered_count = 0
-        if not annotations: # Handle case of no annotations
+    def _calculate_annotation_coverage(self, placed_rois, annotations):
+        """Calculate fraction of annotations properly covered by at least one placed ROI"""
+        if not annotations: # If no annotations to cover, coverage is perfect
             return 1.0 
+        
+        covered_count = 0
         total_annotations = len(annotations)
         
         for ann in annotations:
             ann_bbox = ann['bbox'] 
-            for roi in rois:
-                if self._is_bbox_contained(ann_bbox, roi):
+            for roi in placed_rois:
+                if self._is_bbox_contained(ann_bbox, roi): # ann_bbox is contained in roi
                     covered_count += 1
-                    break 
+                    break # This annotation is covered, move to the next annotation
         
         return covered_count / total_annotations if total_annotations > 0 else 1.0
 
-
-    def _calculate_roi_matching(self, placed_rois, optimal_rois):
-        """Calculate how well placed ROIs match optimal ROIs using IoU"""
-        if not optimal_rois or not placed_rois:
+    def _calculate_roi_matching(self, placed_rois, optimal_rois_list):
+        """Calculate how well placed ROIs match optimal_rois_list using IoU"""
+        if not optimal_rois_list or not placed_rois:
             return 0.0
         
-        total_iou = 0.0
+        total_max_iou_sum = 0.0
         
-        # Create a list to track if an optimal ROI has been matched by a placed ROI
-        # to avoid double-counting when multiple placed ROIs cover the same optimal ROI.
-        # Instead, for each optimal ROI, find its best match among placed ROIs.
+        # For each optimal ROI, find the placed ROI that best matches it
+        for opt_roi in optimal_rois_list:
+            best_iou_for_this_optimal_roi = 0.0
+            for p_roi in placed_rois: # p_roi for placed_roi
+                iou = self._calculate_iou(opt_roi, p_roi) # Order matters if one IoU def is asymmetric
+                best_iou_for_this_optimal_roi = max(best_iou_for_this_optimal_roi, iou)
+            total_max_iou_sum += best_iou_for_this_optimal_roi
         
-        for opt_roi in optimal_rois:
-            best_iou_for_this_opt_roi = 0.0
-            for placed_roi in placed_rois:
-                iou = self._calculate_iou(opt_roi, placed_roi)
-                best_iou_for_this_opt_roi = max(best_iou_for_this_opt_roi, iou)
-            total_iou += best_iou_for_this_opt_roi # Sum of best IoUs for each optimal ROI
-        
-        return total_iou / len(optimal_rois) if optimal_rois else 0.0
+        # Average of the best IoUs found for each optimal ROI
+        return total_max_iou_sum / len(optimal_rois_list)
 
-    def _calculate_roi_overlap_penalty(self, rois):
-        """Calculate penalty for excessive overlap between ROIs"""
-        if len(rois) <= 1:
+    def _calculate_roi_overlap_penalty(self, rois_list): # Renamed to avoid conflict
+        """Calculate penalty for excessive overlap between placed ROIs"""
+        if len(rois_list) <= 1: # No overlap if 0 or 1 ROI
             return 0.0
         
-        total_penalty = 0.0
+        total_overlap_iou = 0.0
         num_pairs = 0
-        for i in range(len(rois)):
-            for j in range(i+1, len(rois)):
-                iou = self._calculate_iou(rois[i], rois[j])
-                if iou > 0.3: # Only penalize IoU above 0.3 (from script 1)
-                    # Script 1 had: total_penalty += (iou - 0.1)
-                    # This can lead to large penalties.
-                    # Let's use a simpler penalty: just sum up significant overlaps.
-                    total_penalty += iou 
-                num_pairs +=1
+        for i in range(len(rois_list)):
+            for j in range(i + 1, len(rois_list)):
+                iou = self._calculate_iou(rois_list[i], rois_list[j])
+                if iou > 0.3: # Only penalize significant IoU (threshold from original script 1)
+                    total_overlap_iou += iou # Summing up significant overlaps
+                num_pairs += 1
         
-        # Normalize penalty by number of pairs if desired, or cap it.
-        # Script 1 capped at 1.0: return min(1.0, total_penalty)
-        # If using sum of IoUs, this cap is important.
-        return min(1.0, total_penalty) 
+        # Capping the penalty at 1.0 (from original script 1)
+        return min(1.0, total_overlap_iou) 
 
     def _calculate_final_reward(self):
         """
-        Calculate final reward.
-        Logic structure from script 1. Reward components/weights from script 2.
+        Calculate final reward based on annotation coverage and ROI matching.
+        Weights and components from script 2's reward logic.
         """
-        if not self.bboxes:
+        if not self.bboxes: # No ROIs placed
             return -10.0, {"metrics": "No ROIs placed"} 
 
-        if self.optimal_rois is None:
+        if self.optimal_rois is None: # Should be calculated in reset
             self.optimal_rois = self._calculate_optimal_rois()
         
-        annotations = self.current_sample.get('annotations', []) # Handle missing annotations
+        annotations = self.current_sample.get('annotations', []) 
         coverage_score = self._calculate_annotation_coverage(self.bboxes, annotations)
         roi_matching_score = self._calculate_roi_matching(self.bboxes, self.optimal_rois)
         
         optimal_count = len(self.optimal_rois) if self.optimal_rois else 0
         placed_count = len(self.bboxes)
 
-        # Reward calculation from Script 2
+        # Final reward weights (from script 2's logic)
         coverage_weight = 70.0
         matching_weight = 30.0
         
-        final_reward = (
+        final_reward_val = ( # Renamed to avoid conflict
             coverage_score * coverage_weight +
             roi_matching_score * matching_weight
         )
         
-        metrics = {
-            'optimal_rois': self.optimal_rois,
+        calculated_metrics = { # Renamed to avoid conflict
+            'optimal_rois_list': self.optimal_rois, # Renamed key
             'coverage_score': coverage_score,
             'roi_matching_score': roi_matching_score,
             'optimal_count': optimal_count,
             'placed_count': placed_count
         }
         
-        return final_reward, metrics
+        return final_reward_val, calculated_metrics
         
     def _get_bbox_size(self):
         """
@@ -679,13 +701,10 @@ class ROIDetectionEnv(gym.Env):
         that corresponds to crop_size in the original image.
         """
         if self.current_sample is None or 'scale_factors' not in self.current_sample:
-            # This can happen if reset() hasn't fully completed or dataset is malformed
-            # Fallback to a fraction of image size or a default if image_size is also not ready
             print("Warning: current_sample or scale_factors not available in _get_bbox_size. Using default.")
             if self.image_size and self.image_size[0] > 0 and self.image_size[1] > 0:
-                 # Default to a small fraction of the image if possible
-                 return int(self.image_size[0] * 0.1), int(self.image_size[1] * 0.1)
-            return self.crop_size # Fallback, though this might be original scale
+                 return int(self.image_size[0] * 0.1), int(self.image_size[1] * 0.1) # Default: 10% of image size
+            return self.crop_size # Fallback: original crop_size (might be wrong scale)
         
         scale_w, scale_h = self.current_sample['scale_factors']
         crop_w, crop_h = self.crop_size
@@ -694,160 +713,160 @@ class ROIDetectionEnv(gym.Env):
     def render(self, mode='rgb_array'):
         """Render the current state of the environment"""
         if self.current_image is None:
-            # Create a dummy black image if current_image is None
-            dummy_h = self.image_size[1] if self.image_size else 256
-            dummy_w = self.image_size[0] if self.image_size else 256
-            image = np.zeros((dummy_h, dummy_w, 3), dtype=np.uint8)
-            # Add text indicating no image
-            cv2.putText(image, "No image loaded", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            dummy_h = self.image_size[1] if self.image_size and len(self.image_size) > 1 else 256
+            dummy_w = self.image_size[0] if self.image_size and len(self.image_size) > 0 else 256
+            image_to_render = np.zeros((dummy_h, dummy_w, 3), dtype=np.uint8)
+            cv2.putText(image_to_render, "No image loaded", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         else:
-            image = self.current_image.copy()
+            image_to_render = self.current_image.copy()
         
+        # Draw ground truth annotations (yellow)
         if 'annotations' in self.current_sample:
             for ann in self.current_sample['annotations']:
-                bbox = ann['bbox']
-                cv2.rectangle(image, 
-                              (int(bbox[0]), int(bbox[1])), 
-                              (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])),
-                              (0, 255, 255), 1) # Yellow for GT annotations
+                bbox_ann = ann['bbox'] # Renamed
+                cv2.rectangle(image_to_render, 
+                              (int(bbox_ann[0]), int(bbox_ann[1])), 
+                              (int(bbox_ann[0] + bbox_ann[2]), int(bbox_ann[1] + bbox_ann[3])),
+                              (0, 255, 255), 1) 
         
+        # Draw optimal ROIs (red)
         if self.optimal_rois:
-            for roi in self.optimal_rois:
-                cv2.rectangle(image,
-                              (int(roi[0]), int(roi[1])),
-                              (int(roi[0] + roi[2]), int(roi[1] + roi[3])),
-                              (0, 0, 255), 1)  # Red for optimal ROIs
+            for roi_opt in self.optimal_rois: # Renamed
+                cv2.rectangle(image_to_render,
+                              (int(roi_opt[0]), int(roi_opt[1])),
+                              (int(roi_opt[0] + roi_opt[2]), int(roi_opt[1] + roi_opt[3])),
+                              (0, 0, 255), 1)  
                 
-        for bbox_placed in self.bboxes: # Renamed to avoid conflict
-            cv2.rectangle(image, 
-                          (int(bbox_placed[0]), int(bbox_placed[1])), 
-                          (int(bbox_placed[0] + bbox_placed[2]), int(bbox_placed[1] + bbox_placed[3])),
-                          (0, 255, 0), 2) # Green for placed bboxes
+        # Draw all placed bboxes (green)
+        for bbox_placed_render in self.bboxes: # Renamed
+            cv2.rectangle(image_to_render, 
+                          (int(bbox_placed_render[0]), int(bbox_placed_render[1])), 
+                          (int(bbox_placed_render[0] + bbox_placed_render[2]), int(bbox_placed_render[1] + bbox_placed_render[3])),
+                          (0, 255, 0), 2)
         
-        if self.current_bbox and len(self.current_bbox) == 4: # Check if current_bbox is valid
-            cv2.rectangle(image,
+        # Draw current movable bbox (blue)
+        if self.current_bbox and len(self.current_bbox) == 4: 
+            cv2.rectangle(image_to_render,
                         (int(self.current_bbox[0]), int(self.current_bbox[1])),
                         (int(self.current_bbox[0] + self.current_bbox[2]), 
                          int(self.current_bbox[1] + self.current_bbox[3])),
-                        (255, 0, 0), 2) # Blue for current movable bbox
+                        (255, 0, 0), 2)
                      
         if mode == 'rgb_array':
-            return image
+            return image_to_render
         elif mode == 'human':
-            cv2.imshow('ROI Detection Environment', image)
+            cv2.imshow('ROI Detection Environment', image_to_render)
             cv2.waitKey(1)
-            return image # Also return image for consistency if needed elsewhere
+            return image_to_render 
             
     def visualize_reward_landscape(self, output_path="reward_landscape.jpg"):
         """
-        Create a visualization of the reward landscape.
+        Create a visualization of the reward shaping potential landscape.
+        This shows the potential value for placing the *next* ROI at different locations.
         """
-        # import matplotlib.pyplot as plt # Moved to top-level
-        # from matplotlib import cm      # Moved to top-level
-        # import numpy as np            # Moved to top-level
-        
         if self.current_image is None or self.bbox_size is None:
             print("Cannot visualize reward landscape: current image or bbox_size is not set.")
             return None
 
-        matched_opt_rois_indices = [] # Store indices
+        # Identify which optimal ROIs are already matched by currently placed bboxes
+        # This is used to color-code optimal ROIs in the visualization
+        matched_optimal_roi_indices_viz = [] 
         if self.optimal_rois:
-            # Determine which optimal ROIs are matched by placed_bboxes
-            # This logic is similar to _dist_to_nearest_unmatched_opt_roi's matching part
-            temp_matched_indices = [] # To avoid modifying list while iterating if complex logic were used
-            for placed_bbox_vis in self.bboxes: # Renamed to avoid conflict
-                best_iou_vis = 0.0
-                best_match_idx_vis = -1
-                for i, roi_vis in enumerate(self.optimal_rois):
-                     if i in temp_matched_indices: continue # Already matched by another placed box
-                     iou_vis = self._calculate_iou(placed_bbox_vis, roi_vis)
-                     if iou_vis > best_iou_vis:
-                         best_iou_vis = iou_vis
-                         best_match_idx_vis = i
-                if best_match_idx_vis != -1 and best_iou_vis > 0.1:
-                     if best_match_idx_vis not in temp_matched_indices:
-                          temp_matched_indices.append(best_match_idx_vis)
-            matched_opt_rois_indices = temp_matched_indices
+            temp_matched_indices_viz = [] 
+            for placed_bbox_viz_scan in self.bboxes: 
+                best_iou_viz_scan = 0.0
+                best_match_opt_idx_viz_scan = -1
+                for i_opt_roi_viz, opt_roi_viz_item in enumerate(self.optimal_rois):
+                     if i_opt_roi_viz in temp_matched_indices_viz: continue 
+                     iou_viz_scan = self._calculate_iou(placed_bbox_viz_scan, opt_roi_viz_item)
+                     if iou_viz_scan > best_iou_viz_scan:
+                         best_iou_viz_scan = iou_viz_scan
+                         best_match_opt_idx_viz_scan = i_opt_roi_viz
+                if best_match_opt_idx_viz_scan != -1 and best_iou_viz_scan > 0.1:
+                     if best_match_opt_idx_viz_scan not in temp_matched_indices_viz:
+                          temp_matched_indices_viz.append(best_match_opt_idx_viz_scan)
+            matched_optimal_roi_indices_viz = temp_matched_indices_viz
 
-        step_vis = max(1, min(self.image_size) // 100) 
-        width_img, height_img = self.image_size # Renamed to avoid conflict
+        grid_step_viz = max(1, min(self.image_size[0], self.image_size[1]) // 100) 
+        img_width_viz, img_height_viz = self.image_size
         
-        rows_map = height_img // step_vis
-        cols_map = width_img // step_vis
-        potential_map = np.zeros((rows_map, cols_map))
+        map_rows_viz = img_height_viz // grid_step_viz
+        map_cols_viz = img_width_viz // grid_step_viz
+        potential_map_viz = np.zeros((map_rows_viz, map_cols_viz))
         
-        # Temporarily clear self.bboxes for landscape calculation if it's based on current_bbox to *any* unmatched
-        # No, _dist_to_nearest_unmatched_opt_roi already considers current self.bboxes
-        # The landscape should reflect the potential for the *next* placement given current state.
-
-        for r_idx in range(rows_map): # r_idx for row index
-            for c_idx in range(cols_map): # c_idx for col index
-                i_coord = r_idx * step_vis # y-coordinate
-                j_coord = c_idx * step_vis # x-coordinate
+        # Calculate potential for a test_bbox centered at each grid point.
+        # The potential function _dist_to_nearest_unmatched_opt_roi considers self.bboxes internally.
+        for r_idx_viz in range(map_rows_viz): 
+            for c_idx_viz in range(map_cols_viz): 
+                y_center_viz = r_idx_viz * grid_step_viz + grid_step_viz // 2 # Center of cell
+                x_center_viz = c_idx_viz * grid_step_viz + grid_step_viz // 2 # Center of cell
                                  
-                test_bbox = [
-                    max(0, j_coord - self.bbox_size[0] // 2),
-                    max(0, i_coord - self.bbox_size[1] // 2),
-                    self.bbox_size[0],
-                    self.bbox_size[1]
-                ]
+                # Define the test bbox based on its center
+                test_bbox_x = max(0, x_center_viz - self.bbox_size[0] // 2)
+                test_bbox_y = max(0, y_center_viz - self.bbox_size[1] // 2)
                 
-                # Calculate potential without jitter for visualization clarity
-                # Create a temporary list of bboxes that would exist if test_bbox was the current_bbox
-                # and we are evaluating its potential based on existing self.bboxes
-                potential = -self._dist_to_nearest_unmatched_opt_roi(test_bbox) 
-                potential_map[r_idx, c_idx] = potential # Correct indexing
+                # Ensure test_bbox doesn't go out of bounds if centered near edge
+                if test_bbox_x + self.bbox_size[0] > img_width_viz:
+                    test_bbox_x = img_width_viz - self.bbox_size[0]
+                if test_bbox_y + self.bbox_size[1] > img_height_viz:
+                    test_bbox_y = img_height_viz - self.bbox_size[1]
+                
+                test_bbox_viz = [test_bbox_x, test_bbox_y, self.bbox_size[0], self.bbox_size[1]]
+                
+                # Calculate potential (negative distance, no jitter for clean visualization)
+                potential_val = -self._dist_to_nearest_unmatched_opt_roi(test_bbox_viz) 
+                potential_map_viz[r_idx_viz, c_idx_viz] = potential_val
         
-        potential_min = np.min(potential_map)
-        potential_max = np.max(potential_map)
-        if potential_max > potential_min: # Avoid division by zero if flat landscape
-            potential_map_normalized = (potential_map - potential_min) / (potential_max - potential_min)
-        elif potential_max == potential_min and potential_max != 0 : # Flat but not zero
-            potential_map_normalized = np.ones_like(potential_map) * 0.5 # Mid-gray
-        else: # Flat and zero, or all same value
-            potential_map_normalized = np.zeros_like(potential_map)
-
+        # Normalize potential map for visualization
+        min_pot_viz = np.min(potential_map_viz)
+        max_pot_viz = np.max(potential_map_viz)
+        if max_pot_viz > min_pot_viz: 
+            norm_potential_map_viz = (potential_map_viz - min_pot_viz) / (max_pot_viz - min_pot_viz)
+        elif max_pot_viz == min_pot_viz and max_pot_viz != 0 : 
+            norm_potential_map_viz = np.ones_like(potential_map_viz) * 0.5 
+        else: 
+            norm_potential_map_viz = np.zeros_like(potential_map_viz)
         
-        plt.figure(figsize=(12, 10)) # Adjusted size
-        
+        plt.figure(figsize=(12, 10)) 
         plt.imshow(cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB))
+        plt.imshow(norm_potential_map_viz, cmap=cm.jet, alpha=0.5, interpolation='bilinear', 
+                   extent=[0, img_width_viz, img_height_viz, 0]) # y-axis inverted for images
         
-        plt.imshow(potential_map_normalized, cmap=cm.jet, alpha=0.5, interpolation='bilinear', 
-                   extent=[0, width_img, height_img, 0]) 
-        
+        # Draw optimal ROIs (red if unmatched, green if matched by a placed bbox)
         if self.optimal_rois:
-            for i, roi_p in enumerate(self.optimal_rois): # roi_p for roi_plot
-                edge_color = 'g' if i in matched_opt_rois_indices else 'r'
+            for i_opt_render, opt_roi_render in enumerate(self.optimal_rois): 
+                edge_color_opt = 'g' if i_opt_render in matched_optimal_roi_indices_viz else 'r'
                 plt.gca().add_patch(plt.Rectangle(
-                    (roi_p[0], roi_p[1]), roi_p[2], roi_p[3], 
-                    linewidth=2, edgecolor=edge_color, facecolor='none'
+                    (opt_roi_render[0], opt_roi_render[1]), opt_roi_render[2], opt_roi_render[3], 
+                    linewidth=2, edgecolor=edge_color_opt, facecolor='none'
                 ))
         
-        for bbox_p in self.bboxes: # bbox_p for bbox_plot
+        # Draw already placed bboxes (e.g., lime green, dashed)
+        for placed_bbox_render_viz in self.bboxes: 
             plt.gca().add_patch(plt.Rectangle(
-                (bbox_p[0], bbox_p[1]), bbox_p[2], bbox_p[3], 
-                linewidth=2, edgecolor='lime', facecolor='none', linestyle='--' # Changed color for placed
+                (placed_bbox_render_viz[0], placed_bbox_render_viz[1]), placed_bbox_render_viz[2], placed_bbox_render_viz[3], 
+                linewidth=2, edgecolor='lime', facecolor='none', linestyle='--'
             ))
         
-        cbar = plt.colorbar(mappable=cm.ScalarMappable(cmap=cm.jet), ax=plt.gca()) # Ensure colorbar matches imshow
-        cbar.set_ticks([0, 0.5, 1])
-        cbar.set_ticklabels([f'{potential_min:.2f} (Low)', 'Medium', f'{potential_max:.2f} (High)'])
+        # Add colorbar reflecting actual potential values before normalization
+        s_map = cm.ScalarMappable(cmap=cm.jet)
+        s_map.set_array([min_pot_viz, max_pot_viz]) # Set array to actual min/max for colorbar scale
+        cbar = plt.colorbar(s_map, ax=plt.gca()) 
         cbar.set_label('Potential Value (Higher is Better, towards Unmatched Optimal ROI)')
         
-        plt.title('Reward Shaping Potential Landscape')
+        plt.title('Reward Shaping Potential Landscape (for next ROI placement)')
         plt.xlabel('X coordinate')
         plt.ylabel('Y coordinate')
         
-        # from matplotlib.patches import Patch # Moved to top-level
-        legend_elements = [
+        legend_elements_viz = [
             Patch(facecolor='none', edgecolor='r', linewidth=2, label='Unmatched Optimal ROI'),
-            Patch(facecolor='none', edgecolor='g', linewidth=2, label='Matched Optimal ROI (by a placed bbox)'),
+            Patch(facecolor='none', edgecolor='g', linewidth=2, label='Matched Optimal ROI'),
             Patch(facecolor='none', edgecolor='lime', linewidth=2, linestyle='--', label='Placed Bbox')
         ]
-        plt.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.05, 1)) # Adjust legend position
+        plt.legend(handles=legend_elements_viz, loc='upper right', bbox_to_anchor=(1.0, 1.15)) # Adjust legend
         
-        plt.tight_layout() # Adjust layout
-        plt.savefig(output_path, dpi=300) # Removed bbox_inches='tight' as tight_layout is used
+        plt.tight_layout() 
+        plt.savefig(output_path, dpi=300) 
         plt.close()
         
         print(f"Reward landscape visualization saved to {output_path}")

@@ -2,19 +2,19 @@ import os
 import time
 import torch
 from stable_baselines3.common.callbacks import CheckpointCallback
-from utils.callbacks import DynamicRewardShapingCallback
-from utils.loggers import TrainingLogger
-
+# Assuming these custom utils are available and working
+# from utils.callbacks import DynamicRewardShapingCallback 
+# from utils.loggers import TrainingLogger
 
 # Import required classes
-from ROIDataset import ROIDataset
+from ROIDataset import ROIDataset # Assuming this file exists and is correct
 from ROIDetectionEnv import ROIDetectionEnv
 from agent import ROIAgent
 
-os.environ['LOKY_MAX_CPU_COUNT'] = '4'
+os.environ['LOKY_MAX_CPU_COUNT'] = '4' # Setting for joblib, used by SB3 for parallel envs if applicable
 
 def main():
-    print("ROI Detection Agent - Training")
+    print("ROI Detection Agent - Training with MaskablePPO") # Updated print
     print("==============================================")
     
     # Check CUDA availability
@@ -27,17 +27,19 @@ def main():
     
     # 1. Setup dataset and environment
     print("Setting up environment...")
+    # Ensure these paths are correct for your system
     dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train"
     coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json"
 
+    # Example for a smaller dataset for quick testing (overfitting)
     # dataset_path = "G:\\rl\\overfit\\images"
     # coco_json_path = "G:\\rl\\overfit\\overfit.json"
     
-    # Create dataset with 640x640 images as requested
+    # Create dataset with 640x640 images
     dataset = ROIDataset(
         dataset_path=dataset_path,
         coco_json_path=coco_json_path,
-        image_size=(640, 640),
+        image_size=(640, 640), # Image size for resizing
         annotations_format="coco",
         shuffle=True
     )
@@ -45,59 +47,60 @@ def main():
     # Create environment
     env = ROIDetectionEnv(
         dataset=dataset,
-        crop_size=(640, 640),
-        time_limit=60  # 1 minute per episode
+        crop_size=(640, 640), # Crop size for ROIs (should relate to model if patches are extracted)
+        time_limit=60  # 1 minute per episode (adjust as needed)
     )
     
-    print(f"Environment ready - dataset has {len(dataset)} samples")
+    print(f"Environment ready - dataset has {len(dataset)} samples") # Uses len(dataset)
     
     # 2. Create and train agent
-    # Modified this part to use the same log directory for all logs
-    log_dir = "logs"  # Single log directory for all logs
+    log_dir = "logs"  # Single log directory
     agent = ROIAgent(
         env=env,
         model_dir="models",
-        log_dir=log_dir,  # Pass the same log directory
-        tensorboard_log=log_dir  # Use the same directory for tensorboard
+        log_dir=log_dir,
+        tensorboard_log=log_dir # Use the same directory for TensorBoard
     )
     
-    # Create a CheckpointCallback
+    # Create a CheckpointCallback to save model periodically
     checkpoint_callback = CheckpointCallback(
-        save_freq=20000,
+        save_freq=20000, # Save every 20000 steps
         save_path="models/checkpoints/",
-        name_prefix="roi_model",
+        name_prefix="roi_maskable_model", # Updated prefix
         verbose=2
     )
    
-    # Dynamic reward shaping callback
+    # Dynamic reward shaping callback (if you are using it)
+    from utils.callbacks import DynamicRewardShapingCallback # Make sure this import is active if using
     shaping_callback = DynamicRewardShapingCallback(
-        check_freq=25000,  # Check every 15000 steps
-        window_size=100,  # Use last 100 episodes
-        initial_coeff=0.1,  # Normal shaping strength 
-        boost_coeff=0.5,  # Boosted shaping strength
-        verbose=1  # Print when changing
+        check_freq=25000,
+        window_size=100,
+        initial_coeff=0.1, 
+        boost_coeff=0.5, 
+        verbose=1
     )
     
-    # Add our simple logger
-    logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)  # Use the same log directory
+    # Training logger callback (if you are using it)
+    from utils.loggers import TrainingLogger # Make sure this import is active if using
+    logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)
 
-    # Combine all callbacks
+    # Combine callbacks
     callbacks = [checkpoint_callback, shaping_callback, logger_callback]
-    # callbacks = [checkpoint_callback, logger_callback]
+    # callbacks = [checkpoint_callback] # Using only checkpoint callback for simplicity here
+    # If you have the custom callbacks, ensure they are compatible and add them back.
 
     # Train and save model
     print("\nTraining agent...")
-    start_time = time.time()
+    start_time_train = time.time() # Renamed for clarity
     
-    # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=10000000, callback=callbacks)
+    agent.train(total_timesteps=10_000_000, callback=callbacks) # Example: 10M timesteps
     
-    training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.2f} seconds")
+    training_duration = time.time() - start_time_train # Renamed
+    print(f"Training completed in {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
     
     # Save final model
-    agent.save_model("final_roi_model")
-    print("Final model saved to models/final_roi_model.zip")
+    agent.save_model("final_roi_maskable_model") # Updated name
+    print("Final model saved to models/final_roi_maskable_model.zip")
 
 if __name__ == "__main__":
     main()
