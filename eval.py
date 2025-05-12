@@ -9,10 +9,10 @@ os.environ['LOKY_MAX_CPU_COUNT'] = '4'
 
 # Setup dataset and environment
 dataset = ROIDataset(
-    # dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train",
-    # coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json",
-    dataset_path = "G:\\rl\\overfit\\images",
-    coco_json_path = "G:\\rl\\overfit\\overfit.json",
+    dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train",
+    coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json",
+    # dataset_path = "G:\\rl\\overfit\\images",
+    # coco_json_path = "G:\\rl\\overfit\\overfit.json",
     image_size=(640, 640),
     annotations_format="coco",
     shuffle=True

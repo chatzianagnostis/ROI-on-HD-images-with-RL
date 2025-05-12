@@ -27,8 +27,11 @@ def main():
     
     # 1. Setup dataset and environment
     print("Setting up environment...")
-    dataset_path = "G:\\rl\\overfit\\images"
-    coco_json_path = "G:\\rl\\overfit\\overfit.json"
+    dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train"
+    coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json"
+
+    # dataset_path = "G:\\rl\\overfit\\images"
+    # coco_json_path = "G:\\rl\\overfit\\overfit.json"
     
     # Create dataset with 640x640 images as requested
     dataset = ROIDataset(
@@ -66,28 +69,28 @@ def main():
         verbose=2
     )
    
-    # # Dynamic reward shaping callback
-    # shaping_callback = DynamicRewardShapingCallback(
-    #     check_freq=15000,  # Check every 15000 steps
-    #     window_size=100,  # Use last 100 episodes
-    #     initial_coeff=0.0,  # Normal shaping strength 
-    #     boost_coeff=0.0,  # Boosted shaping strength
-    #     verbose=1  # Print when changing
-    # )
+    # Dynamic reward shaping callback
+    shaping_callback = DynamicRewardShapingCallback(
+        check_freq=25000,  # Check every 15000 steps
+        window_size=100,  # Use last 100 episodes
+        initial_coeff=0.1,  # Normal shaping strength 
+        boost_coeff=0.5,  # Boosted shaping strength
+        verbose=1  # Print when changing
+    )
     
     # Add our simple logger
     logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)  # Use the same log directory
 
     # Combine all callbacks
-    # callbacks = [checkpoint_callback, shaping_callback, logger_callback]
-    callbacks = [checkpoint_callback, logger_callback]
+    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
+    # callbacks = [checkpoint_callback, logger_callback]
 
     # Train and save model
     print("\nTraining agent...")
     start_time = time.time()
     
     # You can adjust this number based on your computational resources
-    agent.train(total_timesteps=200000, callback=callbacks)
+    agent.train(total_timesteps=10000000, callback=callbacks)
     
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")

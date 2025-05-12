@@ -85,7 +85,7 @@ class ROIAgent:
             policy=ActorCriticPolicy,
             env=env,
             learning_rate=learning_rate,
-            n_steps=1024,
+            n_steps=2048,
             batch_size=64,
             n_epochs=10,
             gamma=0.995,
