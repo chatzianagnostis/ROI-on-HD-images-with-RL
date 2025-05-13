@@ -37,7 +37,7 @@ class ROIDetectionEnv(gym.Env):
         # 6: End episode
         self.action_space = spaces.Discrete(7)
 
-        self.shaping_coeff = 0.01  # Coefficient for shaping reward
+        self.shaping_coeff = 0.0  # Coefficient for shaping reward
         self.gamma_potential_shaping = 0.995 # Discount factor for potential shaping
         
         # Observation space: image and current bbox state
@@ -171,71 +171,96 @@ class ROIDetectionEnv(gym.Env):
         """
         return self._get_action_mask()
 
-    def step(self, action):
-        """Take a step in the environment based on the action (with reward shaping)"""
-        old_potential = 0.0
-        if action < 4: # Only calculate potential for move actions
-             old_potential = self._potential_function(self.current_bbox)
-        
-        reward = 0.0 # Initialize step reward
+    def step(self, action_from_agent):
+        """
+        Take a step in the environment based on the agent's action.
+        If the time limit is reached, the episode is marked as done, 
+        the agent's action for that specific step is not executed,
+        and the reward for this timeout step will primarily be the final_reward_value.
+        """
+        current_reward_for_action = 0.0  # Reward specifically for the action taken in this step (if not timed out)
         done = False
-        info = {} 
-        metrics = {} 
+        info = {}  # Standard dictionary for additional information
+        metrics = {} # For custom metrics logging
 
         elapsed_time = time.time() - self.start_time
+
         if elapsed_time > self.time_limit:
             done = True
-            # Final reward calculation will happen below if episode ends due to time limit
+            # If time limit is reached, the agent's current action is not executed.
+            # current_reward_for_action remains 0 for this "time-out step".
+            # The final_reward_value calculated later will be the main reward for this step.
+            print(f"Time limit ({self.time_limit}s) reached. Agent's action {action_from_agent} was not executed this step.")
+            # Standard way to indicate truncation to SB3 / Gymnasium
+            info['TimeLimit.truncated'] = True 
         else:
-            # Execute the chosen action
-            if action < 4:  # Move bbox
-                self._move_bbox(action)
-                new_potential = self._potential_function(self.current_bbox)
-                shaping_reward = self.gamma_potential_shaping * new_potential - old_potential
-                reward += shaping_reward * self.shaping_coeff # Add shaping reward to step reward
-            elif action == 4:  # Place bbox
-                reward = self._place_bbox() # Get immediate reward from placing
-            elif action == 5:  # Remove bbox
-                reward = self._remove_bbox() # Get immediate reward from removing
-            elif action == 6:  # End episode
-                done = True
-                # Final reward calculation will happen below if episode ends by agent's choice
-            else:
-                print(f"Warning: Invalid action received: {action}")
-                # No explicit penalty for invalid action here, as it should be masked
-                pass
+            # Execute the agent's action if time has not run out
+            info['TimeLimit.truncated'] = False # Episode not truncated by time limit in this path
 
-        # Calculate final reward if episode is done (either by time or action 6)
-        if done:
-            try: 
+            if action_from_agent < 4:  # Action is Move bbox (0: Up, 1: Down, 2: Left, 3: Right)
+                if self.current_bbox: # Ensure current_bbox exists and is valid
+                    old_potential = self._potential_function(self.current_bbox)
+                    self._move_bbox(action_from_agent)
+                    new_potential = self._potential_function(self.current_bbox)
+                    shaping_reward = self.gamma_potential_shaping * new_potential - old_potential
+                    current_reward_for_action = shaping_reward * self.shaping_coeff
+                else:
+                    # This case should ideally not be reached if reset() and _move_bbox() are robust
+                    print("Warning: Agent tried to move a None or invalid current_bbox.")
+                    current_reward_for_action = 0.0 # Or a small penalty
+            elif action_from_agent == 4:  # Action is Place bbox
+                current_reward_for_action = self._place_bbox()
+            elif action_from_agent == 5:  # Action is Remove bbox
+                current_reward_for_action = self._remove_bbox()
+            elif action_from_agent == 6:  # Action is End episode (chosen by agent)
+                done = True
+                # Action 6 itself doesn't have an immediate reward;
+                # the final_reward_value calculated later will apply.
+                current_reward_for_action = 0.0 
+            else:
+                # This case should ideally not be reached if the agent's action space is respected
+                print(f"Warning: Invalid action {action_from_agent} received from agent.")
+                current_reward_for_action = 0.0 # Or a small penalty for an invalid action
+
+        # The total reward for this step starts with the reward from the action itself
+        total_step_reward = current_reward_for_action
+
+        if done: # If the episode ended (either by time limit or agent's choice)
+            try:
                 final_reward_value, metrics_from_final_reward = self._calculate_final_reward()
-                reward += final_reward_value # Add final reward to any existing step reward
-                metrics.update(metrics_from_final_reward) # Merge metrics
-                metrics['time'] = {'elapsed': elapsed_time, 'limit': self.time_limit}
-                info['metrics'] = metrics
+                total_step_reward += final_reward_value # Add the final episodic reward
+                
+                # Update metrics
+                if metrics_from_final_reward: # Ensure it's not None
+                    metrics.update(metrics_from_final_reward)
+                metrics['time_elapsed_at_done'] = elapsed_time # Log actual time when done
+                metrics['time_limit_episode'] = self.time_limit
+
             except Exception as e:
                 print(f"Error during final reward calculation: {e}")
-                reward += -10.0 # Fallback penalty if final reward calculation fails
-                info['metrics'] = metrics # metrics might be partially filled or empty
+                total_step_reward += -10.0 # Fallback penalty if final reward calculation fails
+            
+            # Ensure metrics dictionary is always in info if done
+            info['metrics'] = metrics if metrics else {}
 
-        # Get action mask for the *next* state (required by some SB3 algorithms, good practice)
-        # MaskablePPO will use the action_masks() method directly during its own step.
-        # However, returning it in info is still a common pattern.
-        try: 
-            next_action_mask = self._get_action_mask() # or self.action_masks()
-            info['action_mask'] = next_action_mask
-        except Exception as e:
-            print(f"Error calculating action mask for info: {e}")
-            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8) # Default: all actions enabled
 
         # Get observation for the next state
-        try: 
+        try:
             observation = self._get_observation()
-        except Exception as e:
+        except Exception as e: # Catch specific exceptions if possible
             print(f"Error getting observation: {e}")
-            observation = self.observation_space.sample() # Return a sample observation as fallback
+            # Fallback to a sample observation from the observation space
+            observation = self.observation_space.sample() 
 
-        return observation, reward, done, info
+        # Get action mask for the next state (important for MaskablePPO)
+        try:
+            info['action_mask'] = self._get_action_mask()
+        except Exception as e: # Catch specific exceptions if possible
+            print(f"Error getting action_mask for info: {e}")
+            # Fallback: all actions enabled (though this might cause issues for MaskablePPO)
+            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8)
+
+        return observation, total_step_reward, done, info
     
     def _get_observation(self):
         """Get the current observation"""
@@ -293,52 +318,50 @@ class ROIDetectionEnv(gym.Env):
 
     def _place_bbox(self):
         """
-        Place the current bounding box.
-        Logic includes safeguards and overlap checks.
-        Reward is based on IoU with optimal ROIs.
+        Place the current bounding box. The box is always added to self.bboxes
+        if this function is called, as action masking should prevent invalid placements.
+        The reward is determined by IoU with optimal ROIs first. If no IoU with optimal,
+        then a penalty for significant overlap with other existing bboxes is considered.
         """
-        MAX_BBOXES = 100
-        IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
         current_bbox_to_place = self.current_bbox.copy()
+        reward = 0.0  # Initialize reward
 
-        # Safeguard 1: Max boxes reached?
-        if len(self.bboxes) >= MAX_BBOXES:
-            return 0.0 # Neutral reward as this should ideally be caught by action mask
-
-        # Safeguard 2: Placing almost exactly on top of an existing bbox?
-        for existing_bbox in self.bboxes:
-            iou = self._calculate_iou(current_bbox_to_place, existing_bbox)
-            if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
-                return -0.2 # Penalty for identical placement
-
-        # Overlap Check (as per original logic from script 1):
-        # If significant overlap, add box, then return penalty.
-        overlap_threshold_significant = 0.8 
-        overlap_penalty_significant = -0.2 
-
-        for existing_bbox in self.bboxes: 
-            iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
-            if iou_with_existing > overlap_threshold_significant:
-                self.bboxes.append(current_bbox_to_place) # Add box despite overlap
-                return overlap_penalty_significant          # Return penalty
-
-        # If no significant overlap (that triggers immediate return) was found, add the box.
-        self.bboxes.append(current_bbox_to_place)
-
-        # IoU-based reward calculation (rewards from script 2's logic)
+        # Calculate IoU with optimal ROIs
         max_iou_with_optimal = 0.0
         if self.optimal_rois:
             for opt_roi in self.optimal_rois:
-                iou = self._calculate_iou(current_bbox_to_place, opt_roi)
-                if iou > max_iou_with_optimal:
-                    max_iou_with_optimal = iou
-        
-        if max_iou_with_optimal > 0: 
-            reward = (max_iou_with_optimal * max_iou_with_optimal) * 10.0 
-            return reward
+                iou_val = self._calculate_iou(current_bbox_to_place, opt_roi) # Renamed iou to iou_val
+                if iou_val > max_iou_with_optimal:
+                    max_iou_with_optimal = iou_val
+
+        if max_iou_with_optimal > 0:
+            # Primary reward source: good IoU with an optimal ROI
+            reward = (max_iou_with_optimal) * 10.0
         else:
-            return 0.0 # Neutral reward if no good match / IoU is 0
+            # No IoU with optimal_rois, check for significant overlap with existing bboxes
+            # This penalty is applied if the box isn't "good" on its own.
+            overlap_threshold_significant = 0.8
+            overlap_penalty_significant = -0.2
+            
+            found_significant_overlap = False
+            for existing_bbox in self.bboxes: # Check against bboxes already in the list
+                iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
+                if iou_with_existing > overlap_threshold_significant:
+                    found_significant_overlap = True
+                    break 
+            
+            if found_significant_overlap:
+                reward = overlap_penalty_significant
+            else:
+                # No IoU with optimal AND no significant overlap with existing
+                reward = 0.0
+
+        # Add the box to the list as per the requirement that it's always added
+        # if the 'place' action is chosen (due to action masking).
+        self.bboxes.append(current_bbox_to_place)
         
+        return reward
+    
     def _remove_bbox(self):
         """
         Remove the last placed bounding box.

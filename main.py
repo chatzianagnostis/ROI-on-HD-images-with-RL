@@ -85,8 +85,8 @@ def main():
     logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)
 
     # Combine callbacks
-    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
-    # callbacks = [checkpoint_callback] # Using only checkpoint callback for simplicity here
+    # callbacks = [checkpoint_callback, shaping_callback, logger_callback]
+    callbacks = [checkpoint_callback, logger_callback] # Using only checkpoint callback for simplicity here
     # If you have the custom callbacks, ensure they are compatible and add them back.
 
     # Train and save model
