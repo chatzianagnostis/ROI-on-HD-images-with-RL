@@ -93,7 +93,7 @@ def main():
     print("\nTraining agent...")
     start_time_train = time.time() # Renamed for clarity
     
-    agent.train(total_timesteps=10_000_000, callback=callbacks) # Example: 10M timesteps
+    agent.train(total_timesteps=100_000_000, callback=callbacks) # Example: 10M timesteps
     
     training_duration = time.time() - start_time_train # Renamed
     print(f"Training completed in {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
