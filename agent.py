@@ -1,186 +1,244 @@
+"""
+Region of Interest Detection Agent using Maskable PPO.
+
+This module implements a reinforcement learning agent and feature extractor
+for training models to detect regions of interest in images.
+"""
+
 import os
+from typing import Dict, List, Optional, Tuple, Any
+
 import numpy as np
 import torch
 import torch.nn as nn
-from sb3_contrib import MaskablePPO # Using MaskablePPO
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy # Policy for MaskablePPO
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from torchvision import models
 from gym import spaces
-from typing import Dict, List, Optional # Not explicitly used by this agent class
+
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.callbacks import BaseCallback
+
 
 class ROIFeatureExtractor(BaseFeaturesExtractor):
-    """Feature extractor for the ROI Detection environment using ResNet18"""
+    """
+    Feature extractor for the ROI Detection environment.
+    
+    This class uses a pre-trained ResNet18 with frozen early layers to efficiently
+    extract features from images, combined with a separate network to process
+    bounding box states. The outputs are concatenated and passed through a
+    final linear layer to produce a unified feature representation.
+    """
+    
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
+        """
+        Initialize the feature extractor.
+        
+        Args:
+            observation_space: The observation space from the environment
+            features_dim: Dimension of the output feature vector
+        """
         super(ROIFeatureExtractor, self).__init__(observation_space, features_dim)
         
+        # ----- Image Processing Network -----
         # Load ResNet18 and remove final FC layer
-        self.cnn = models.resnet18(weights = models.ResNet18_Weights.DEFAULT)
-        self.cnn = nn.Sequential(*list(self.cnn.children())[:-1]) # Remove the final fully connected layer
+        self.cnn = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # Keep everything except the final fully connected layer
+        self.cnn = nn.Sequential(*list(self.cnn.children())[:-1])
         
-        # Freeze most layers to speed up training (e.g., all but the last few conv layers/blocks)
-        # The exact number of layers to freeze might need tuning.
-        # Here, assuming parameters are in order and we unfreeze roughly the last block (e.g. layer4).
-        # Counting children of nn.Sequential:
-        # 0: conv1, 1: bn1, 2: relu, 3: maxpool, 4: layer1, 5: layer2, 6: layer3, 7: layer4, 8: avgpool (removed with [:-1])
-        # If cnn is now Sequential(*list(orig_resnet.children())[:-1]), then children are:
-        # [conv1, bn1, relu, maxpool, layer1, layer2, layer3, layer4, avgpool] (if avgpool was kept, but it's usually removed by [:-1] above or by taking children()[:-2] on original ResNet)
-        # If self.cnn = nn.Sequential(*list(self.cnn.children())[:-1]) refers to the original ResNet's children minus FC, then avgpool is the last.
-        # Let's assume the intention is to unfreeze the last convolutional block (layer4) and the preceding layers are frozen.
-        # ResNet18 structure: conv1, bn1, relu, maxpool, layer1, layer2, layer3, layer4, avgpool, fc
-        # After `*list(self.cnn.children())[:-1]`: removes fc. Then `*list(self.cnn.children())[:-1]` again removes avgpool.
-        # So self.cnn contains [conv1, bn1, relu, maxpool, layer1, layer2, layer3, layer4]
-        # `list(self.cnn.parameters())[:-4]` might not be robust. A better way is to iterate through named modules.
-        # For simplicity, keeping the original logic, but this might need review for optimal fine-tuning.
-        num_params_to_unfreeze = 10 # Example: unfreeze parameters of last few layers.
-                                   # This depends on how parameters are grouped.
-        # A more robust way to freeze:
-        # for name, param in self.cnn.named_parameters():
-        #    if not name.startswith("7."): # Assuming layer4 is child '7' in the nn.Sequential
-        #        param.requires_grad = False
-        # Given the original `[:-4]`, let's stick to it for now.
-        for param in list(self.cnn.parameters())[:-num_params_to_unfreeze]: # Adjust number if needed
-            param.requires_grad = False
-            
-        # Network for bbox state processing
-        # Ensure bbox_shape correctly reflects the flattened dimension
+        # Freeze early layers to speed up training and prevent overfitting
+        # Only fine-tune the last few layers that are more task-specific
+        num_params_to_unfreeze = 10  # Number of parameters to unfreeze
+        
+        # A more robust way to selectively freeze layers:
+        for name, param in self.cnn.named_parameters():
+            # Freeze everything except the last layer (layer4 in ResNet18)
+            if not name.startswith("7."):  # layer4 is at index 7 in ResNet18
+                param.requires_grad = False
+        
+        # ----- Bounding Box State Processing Network -----
+        # Calculate input dimension from the observation space
         bbox_input_dim = np.prod(observation_space.spaces['bbox_state'].shape)
+        
         self.bbox_encoder = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(bbox_input_dim, 64), # Use calculated input dimension
+            nn.Linear(bbox_input_dim, 64),
             nn.ReLU()
         )
         
-        # Combine features from CNN (512 for ResNet18) and bbox_encoder (64)
+        # ----- Combined Features Network -----
+        # ResNet18 outputs 512-dimensional vectors before the FC layer
         self.combined_layer = nn.Sequential(
-            nn.Linear(512 + 64, features_dim), # 512 from ResNet18's output before FC
+            nn.Linear(512 + 64, features_dim),
             nn.ReLU()
         )
         
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # Get the image from observations
-        image = observations['image'] # Expected shape (N, H, W, C) or (N, C, H, W)
+        """
+        Process observations through the feature extractor.
         
-        # SB3 passes images as (N, H, W, C) for Box space, PyTorch CNNs expect (N, C, H, W)
-        # Also, ensure normalization matches what ResNet18 expects
-        # image = image.permute(0, 3, 1, 2) # Change to (N, C, H, W)
-        image = image.float() / 255.0 # Normalize to [0, 1]
-        # Further normalization (mean, std) as used during ResNet training can be beneficial
-        # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        # image = normalize(image) # This would require torchvision.transforms
-
+        Args:
+            observations: Dictionary containing 'image' and 'bbox_state'
+            
+        Returns:
+            torch.Tensor: Extracted features of dimension features_dim
+        """
+        # ----- Process Image -----
+        image = observations['image']  # Shape: (N, H, W, C) or (N, C, H, W)
+        
+        # Normalize images to [0, 1] range
+        image = image.float() / 255.0
+        
+        # Extract image features
         image_features = self.cnn(image)
         image_features = torch.flatten(image_features, start_dim=1)
         
-        # Process bbox state
+        # ----- Process Bounding Box State -----
         bbox_state = observations['bbox_state'].float()
-        # The Flatten layer in bbox_encoder handles unbatched/batched cases.
-        # No need for manual reshape if Flatten() is the first layer.
-        # if len(bbox_state.shape) > 2: # This was for manual flattening logic
-        #     bbox_state = bbox_state.reshape(bbox_state.shape[0], -1)
-        # else:
-        #     bbox_state = bbox_state.reshape(1, -1) # This would fail if batch_size > 1 and input is already (N, Flat)
-            
-        bbox_features = self.bbox_encoder(bbox_state) # Flatten is handled by nn.Flatten()
+        bbox_features = self.bbox_encoder(bbox_state)
         
-        # Combine features from both inputs
+        # ----- Combine Features -----
         combined = torch.cat([image_features, bbox_features], dim=1)
         return self.combined_layer(combined)
 
+
 class ROIAgent:
-    """Agent for ROI Detection using MaskablePPO"""
+    """
+    Agent for ROI Detection using Maskable PPO.
+    
+    This class handles the training, saving, loading, and inference of a
+    reinforcement learning agent for the ROI detection task. It uses MaskablePPO
+    which supports action masking to ensure valid actions in the environment.
+    """
+    
     def __init__(
         self,
         env,
-        model_dir="models",
-        log_dir="logs",
-        tensorboard_log=None, 
-        learning_rate=3e-4
+        model_dir: str = "models",
+        log_dir: str = "logs",
+        tensorboard_log: Optional[str] = None,
+        learning_rate: float = 3e-4
     ):
+        """
+        Initialize the ROI Agent.
+        
+        Args:
+            env: The gym environment
+            model_dir: Directory to save models
+            log_dir: Directory to save logs
+            tensorboard_log: Directory for tensorboard logs (defaults to log_dir)
+            learning_rate: Learning rate for the optimizer
+        """
+        # Create directories if they don't exist
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
         
+        # Set tensorboard log directory
         if tensorboard_log is None:
-            tensorboard_log = log_dir # Default tensorboard_log to log_dir
+            tensorboard_log = log_dir
         else:
             os.makedirs(tensorboard_log, exist_ok=True)
 
-        # MaskablePPO hyperparameters
-        ppo_params = dict(
-            policy=MaskableActorCriticPolicy,  # Use the maskable policy
-            env=env,
-            learning_rate=learning_rate,
-            n_steps=2048,
-            batch_size=64,
-            n_epochs=10,
-            gamma=0.995,
-            gae_lambda=0.95,
-            ent_coef=0.005,
-            clip_range=0.2,
-            vf_coef = 0.5,
-            max_grad_norm = 0.5,
-            normalize_advantage = True,
-            verbose=2,
-            tensorboard_log=tensorboard_log,
-            policy_kwargs={
-                "features_extractor_class": ROIFeatureExtractor,
-                "features_extractor_kwargs": dict(features_dim=256),
-            }
-        )
-
-        # Initialize MaskablePPO
-        self.model = MaskablePPO(**ppo_params)
-
+        # Store environment and directories
         self.env = env
         self.model_dir = model_dir
         self.log_dir = log_dir
+        
+        # Configure MaskablePPO hyperparameters
+        ppo_params = {
+            # Core components
+            "policy": MaskableActorCriticPolicy,
+            "env": env,
+            "learning_rate": learning_rate,
+            
+            # Sample collection parameters
+            "n_steps": 1024,
+            "batch_size": 64,
+            
+            # Training parameters
+            "n_epochs": 10,
+            "gamma": 0.995,
+            "gae_lambda": 0.995,
+            "ent_coef": 0.0005,
+            "clip_range": 0.2,
+            "vf_coef": 0.005,
+            "max_grad_norm": 0.5,
+            "normalize_advantage": True,
+            
+            # Miscellaneous
+            "verbose": 2,
+            "tensorboard_log": tensorboard_log,
+            
+            # Custom feature extractor
+            "policy_kwargs": {
+                "features_extractor_class": ROIFeatureExtractor,
+                "features_extractor_kwargs": {"features_dim": 256},
+            }
+        }
 
-    def train(self, total_timesteps=1_000_000, callback=None):
+        # Initialize the MaskablePPO model
+        self.model = MaskablePPO(**ppo_params)
+
+    def train(self, total_timesteps: int = 1_000_000, callback: Optional[BaseCallback] = None) -> None:
         """
-        Train the agent
+        Train the agent for a specified number of timesteps.
         
         Args:
-            total_timesteps: Number of timesteps to train for
-            callback: Optional callback(s) to use during training
+            total_timesteps: Total number of environment timesteps to train for
+            callback: Optional callback(s) to use during training for monitoring,
+                      evaluation, or early stopping
         """
         self.model.learn(total_timesteps=total_timesteps, callback=callback)
 
-    def save_model(self, name="roi_maskable_agent"): # Updated default name
+    def save_model(self, name: str = "roi_maskable_agent") -> None:
+        """
+        Save the trained model to disk.
+        
+        Args:
+            name: Base name for the saved model file
+        """
         path = os.path.join(self.model_dir, name)
         self.model.save(path)
         print(f"Model saved to {path}.zip")
 
-
-    def load_model(self, name="roi_maskable_agent"): # Updated default name
+    def load_model(self, name: str = "roi_maskable_agent") -> None:
+        """
+        Load a trained model from disk.
+        
+        Args:
+            name: Base name of the model file to load
+        """
         path = os.path.join(self.model_dir, name)
-        # Load with MaskablePPO
         self.model = MaskablePPO.load(path, env=self.env)
         print(f"Model loaded from {path}.zip")
-
         
-    def predict(self, observation, deterministic=True):
-        """Make a prediction with the model, applying action masks."""
-        action_masks_pred = None # Renamed to avoid conflict
-
-        # Get action masks from the environment for prediction
-        # This assumes self.env is the base environment or a compatible wrapper.
-        # If self.env is a VecEnv, MaskablePPO handles mask collection during training.
-        # For single observation predict, we might need to fetch it manually if env is not directly the base env.
-        # For simplicity, assuming self.env is the direct ROIDetectionEnv instance.
-        # Note: When using model directly (e.g. after loading), env passed to load() is used for action space etc.
-        # but for action_masks in predict, we need the current mask from the actual env instance.
+    def predict(self, observation: Dict[str, np.ndarray], deterministic: bool = True) -> np.ndarray:
+        """
+        Make a prediction with the model, applying action masks.
         
-        # If the environment instance used for predict is the same as self.env:
+        This method retrieves the current action mask from the environment
+        and uses it to ensure only valid actions are selected.
+        
+        Args:
+            observation: Environment observation
+            deterministic: Whether to use deterministic actions (True for evaluation)
+            
+        Returns:
+            np.ndarray: Selected action
+        """
+        # Get action mask from environment if available
+        action_mask = None
+        
         if hasattr(self.env, 'action_masks') and callable(self.env.action_masks):
-            action_masks_pred = self.env.action_masks() 
-        # else:
-            # This branch might be needed if self.env is a VecEnv and we are predicting on an unwrapped observation.
-            # For training, MaskablePPO handles VecEnvs correctly.
-            # print("Warning: Could not get action_masks for predict. Prediction might not be masked.")
+            action_mask = self.env.action_masks()
+        else:
+            print("Warning: Could not get action_masks. Prediction might include invalid actions.")
 
+        # Make prediction using the masked policy
         action, _states = self.model.predict(
             observation,
             deterministic=deterministic,
-            action_masks=action_masks_pred # Pass the fetched masks
+            action_masks=action_mask
         )
-        return action # Typically return just the action
+        
+        return action

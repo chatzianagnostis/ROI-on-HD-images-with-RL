@@ -28,12 +28,12 @@ def main():
     # 1. Setup dataset and environment
     print("Setting up environment...")
     # Ensure these paths are correct for your system
-    dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train"
-    coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json"
+    # dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train"
+    # coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json"
 
     # Example for a smaller dataset for quick testing (overfitting)
-    # dataset_path = "G:\\rl\\overfit\\images"
-    # coco_json_path = "G:\\rl\\overfit\\overfit.json"
+    dataset_path = "G:\\rl\\overfit\\images"
+    coco_json_path = "G:\\rl\\overfit\\overfit.json"
     
     # Create dataset with 640x640 images
     dataset = ROIDataset(
@@ -73,7 +73,7 @@ def main():
     # Dynamic reward shaping callback (if you are using it)
     from utils.callbacks import DynamicRewardShapingCallback # Make sure this import is active if using
     shaping_callback = DynamicRewardShapingCallback(
-        check_freq=25000,
+        check_freq=20000,
         window_size=100,
         initial_coeff=0.1, 
         boost_coeff=0.5, 
@@ -85,15 +85,13 @@ def main():
     logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)
 
     # Combine callbacks
-    # callbacks = [checkpoint_callback, shaping_callback, logger_callback]
-    callbacks = [checkpoint_callback, logger_callback] # Using only checkpoint callback for simplicity here
-    # If you have the custom callbacks, ensure they are compatible and add them back.
+    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
 
     # Train and save model
     print("\nTraining agent...")
     start_time_train = time.time() # Renamed for clarity
     
-    agent.train(total_timesteps=100_000_000, callback=callbacks) # Example: 10M timesteps
+    agent.train(total_timesteps=200_000, callback=callbacks) # Example: 10M timesteps
     
     training_duration = time.time() - start_time_train # Renamed
     print(f"Training completed in {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")

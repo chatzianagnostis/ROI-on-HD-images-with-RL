@@ -139,7 +139,7 @@ class TrainingLogger(BaseCallback):
     
     def _print_episode_footer(self, total_reward, info):
         """Print a footer with episode summary"""
-        footer_text = f"\n{'-'*60}\nEPISODE {self.episode_counter + 1} COMPLETE\n{'-'*60}\n"
+        footer_text = f"\n{'-'*60}\nEPISODE {self.episode_counter} COMPLETE\n{'-'*60}\n"
         footer_text += f"Total reward: {total_reward:.4f}\n"
         footer_text += f"Steps taken: {self.step_counter}\n"
         
