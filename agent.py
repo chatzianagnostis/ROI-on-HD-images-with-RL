@@ -1,5 +1,5 @@
 """
-Region of Interest Detection Agent using Maskable PPO.
+Region of Interest Detection Agent using standard PPO.
 
 This module implements a reinforcement learning agent and feature extractor
 for training models to detect regions of interest in images.
@@ -14,8 +14,8 @@ import torch.nn as nn
 from torchvision import models
 from gym import spaces
 
-from sb3_contrib import MaskablePPO
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from stable_baselines3 import PPO
+from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -46,15 +46,9 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         # Keep everything except the final fully connected layer
         self.cnn = nn.Sequential(*list(self.cnn.children())[:-1])
         
-        # Freeze early layers to speed up training and prevent overfitting
-        # Only fine-tune the last few layers that are more task-specific
-        num_params_to_unfreeze = 10  # Number of parameters to unfreeze
-        
-        # A more robust way to selectively freeze layers:
-        for name, param in self.cnn.named_parameters():
-            # Freeze everything except the last layer (layer4 in ResNet18)
-            if not name.startswith("7."):  # layer4 is at index 7 in ResNet18
-                param.requires_grad = False
+        # Freeze the ENTIRE ResNet18 - no fine tuning
+        for param in self.cnn.parameters():
+            param.requires_grad = False
         
         # ----- Bounding Box State Processing Network -----
         # Calculate input dimension from the observation space
@@ -104,11 +98,10 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
 
 class ROIAgent:
     """
-    Agent for ROI Detection using Maskable PPO.
+    Agent for ROI Detection using standard PPO.
     
     This class handles the training, saving, loading, and inference of a
-    reinforcement learning agent for the ROI detection task. It uses MaskablePPO
-    which supports action masking to ensure valid actions in the environment.
+    reinforcement learning agent for the ROI detection task using standard PPO.
     """
     
     def __init__(
@@ -143,11 +136,13 @@ class ROIAgent:
         self.env = env
         self.model_dir = model_dir
         self.log_dir = log_dir
+
+        net_arch = dict(pi=[1024, 512, 256], vf=[1024, 512, 256]) 
         
-        # Configure MaskablePPO hyperparameters
+        # Configure PPO hyperparameters
         ppo_params = {
             # Core components
-            "policy": MaskableActorCriticPolicy,
+            "policy": ActorCriticPolicy,
             "env": env,
             "learning_rate": learning_rate,
             
@@ -173,11 +168,14 @@ class ROIAgent:
             "policy_kwargs": {
                 "features_extractor_class": ROIFeatureExtractor,
                 "features_extractor_kwargs": {"features_dim": 256},
+                "activation_fn": torch.nn.ReLU,    
+                "optimizer_class": torch.optim.RAdam,
+                "net_arch": net_arch,
             }
         }
 
-        # Initialize the MaskablePPO model
-        self.model = MaskablePPO(**ppo_params)
+        # Initialize the PPO model
+        self.model = PPO(**ppo_params)
 
     def train(self, total_timesteps: int = 1_000_000, callback: Optional[BaseCallback] = None) -> None:
         """
@@ -190,7 +188,7 @@ class ROIAgent:
         """
         self.model.learn(total_timesteps=total_timesteps, callback=callback)
 
-    def save_model(self, name: str = "roi_maskable_agent") -> None:
+    def save_model(self, name: str = "roi_ppo_agent") -> None:
         """
         Save the trained model to disk.
         
@@ -201,7 +199,7 @@ class ROIAgent:
         self.model.save(path)
         print(f"Model saved to {path}.zip")
 
-    def load_model(self, name: str = "roi_maskable_agent") -> None:
+    def load_model(self, name: str = "roi_ppo_agent") -> None:
         """
         Load a trained model from disk.
         
@@ -209,15 +207,12 @@ class ROIAgent:
             name: Base name of the model file to load
         """
         path = os.path.join(self.model_dir, name)
-        self.model = MaskablePPO.load(path, env=self.env)
+        self.model = PPO.load(path, env=self.env)
         print(f"Model loaded from {path}.zip")
         
     def predict(self, observation: Dict[str, np.ndarray], deterministic: bool = True) -> np.ndarray:
         """
-        Make a prediction with the model, applying action masks.
-        
-        This method retrieves the current action mask from the environment
-        and uses it to ensure only valid actions are selected.
+        Make a prediction with the model.
         
         Args:
             observation: Environment observation
@@ -226,19 +221,9 @@ class ROIAgent:
         Returns:
             np.ndarray: Selected action
         """
-        # Get action mask from environment if available
-        action_mask = None
-        
-        if hasattr(self.env, 'action_masks') and callable(self.env.action_masks):
-            action_mask = self.env.action_masks()
-        else:
-            print("Warning: Could not get action_masks. Prediction might include invalid actions.")
-
-        # Make prediction using the masked policy
         action, _states = self.model.predict(
             observation,
-            deterministic=deterministic,
-            action_masks=action_mask
+            deterministic=deterministic
         )
         
         return action

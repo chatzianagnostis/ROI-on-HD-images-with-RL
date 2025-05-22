@@ -14,7 +14,7 @@ from agent import ROIAgent
 os.environ['LOKY_MAX_CPU_COUNT'] = '4' # Setting for joblib, used by SB3 for parallel envs if applicable
 
 def main():
-    print("ROI Detection Agent - Training with MaskablePPO") # Updated print
+    print("ROI Detection Agent - Training with standard PPO")
     print("==============================================")
     
     # Check CUDA availability
@@ -66,7 +66,7 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=20000, # Save every 20000 steps
         save_path="models/checkpoints/",
-        name_prefix="roi_maskable_model", # Updated prefix
+        name_prefix="roi_ppo_model", # Updated prefix
         verbose=2
     )
    
@@ -85,7 +85,7 @@ def main():
     logger_callback = TrainingLogger(log_dir=log_dir, verbose=1)
 
     # Combine callbacks
-    callbacks = [checkpoint_callback, shaping_callback, logger_callback]
+    callbacks = [checkpoint_callback, logger_callback]
 
     # Train and save model
     print("\nTraining agent...")
@@ -97,8 +97,8 @@ def main():
     print(f"Training completed in {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
     
     # Save final model
-    agent.save_model("final_roi_maskable_model") # Updated name
-    print("Final model saved to models/final_roi_maskable_model.zip")
+    agent.save_model("final_roi_ppo_model") # Updated name
+    print("Final model saved to models/final_roi_ppo_model.zip")
 
 if __name__ == "__main__":
     main()

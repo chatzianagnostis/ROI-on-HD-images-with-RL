@@ -9,8 +9,8 @@ from agent import ROIAgent
 
 # Setup dataset
 dataset = ROIDataset(
-    dataset_path="G:\\rl\\dhd_campus\\dhd_campus_train_images_part1\\dhd_campus\\images\\train",
-    coco_json_path="G:\\rl\\dhd_campus\\dhd_pedestrian_campus_trainval_annos\\dhd_pedestrian\\ped_campus\\annotations\\dhd_pedestrian_campus_train.json",
+    dataset_path="G:\\rl\\overfit\\images",
+    coco_json_path="G:\\rl\\overfit\\overfit.json",
     image_size=(640, 640),
     annotations_format="coco",
     shuffle=True
@@ -25,7 +25,7 @@ env = ROIDetectionEnv(
 
 # Load trained agent
 agent = ROIAgent(env)
-agent.load_model("checkpoints/roi_maskable_model_260000_steps")
+agent.load_model("checkpoints/roi_ppo_model_60000_steps")  # Updated model name
 
 # Create output directory for videos
 output_dir = "evaluation_videos"
@@ -86,14 +86,8 @@ for episode in range(num_episodes):
             'bbox_state': torch.tensor(obs['bbox_state']).unsqueeze(0)
         }
         
-        # Get action masks if the environment supports them
-        if hasattr(env, 'action_masks') and callable(env.action_masks):
-            action_masks = env.action_masks()
-            action_masks = torch.tensor(action_masks).unsqueeze(0)
-            action, _ = agent.model.predict(obs_dict, deterministic=True, action_masks=action_masks)
-        else:
-            # Fallback without action masks
-            action, _ = agent.model.predict(obs_dict, deterministic=True)
+        # Standard prediction (no action masks)
+        action, _ = agent.model.predict(obs_dict, deterministic=True)
         
         # Ensure action is a scalar if the agent returns a batch of 1
         if isinstance(action, np.ndarray) and action.shape == (1,):
@@ -106,8 +100,8 @@ for episode in range(num_episodes):
         current_info = info  # Keep track of the latest info
         step_count += 1
         
-        if step_count % 10 == 0:
-            print(f"  Step {step_count}, Reward: {reward:.4f}")
+        # Print step information
+        print(f"  Step {step_count}, Action: {action}, Reward: {reward:.4f}")
         
         # Short delay to make visualization easier to follow
         time.sleep(0.05)

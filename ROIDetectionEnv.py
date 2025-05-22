@@ -71,7 +71,7 @@ class ROIDetectionEnv(gym.Env):
         self.action_space = spaces.Discrete(7)
 
         # Reward shaping parameters
-        self.shaping_coeff = 0.01  # Coefficient for shaping reward
+        self.shaping_coeff = 0.00  # Coefficient for shaping reward
         self.gamma_potential_shaping = 0.995  # Discount factor for potential shaping
         
         # Observation space: image and current bbox state
@@ -147,10 +147,6 @@ class ROIDetectionEnv(gym.Env):
         """
         Take a step in the environment based on the agent's action.
         
-        If the time limit is reached, the episode is marked as done,
-        the agent's action for that specific step is not executed,
-        and the reward for this timeout step will primarily be the final_reward_value.
-        
         Args:
             action_from_agent: The action selected by the agent (0-6)
             
@@ -180,7 +176,7 @@ class ROIDetectionEnv(gym.Env):
             # Time limit not reached - proceed with action execution
             info['TimeLimit.truncated'] = False
 
-            # Execute the selected action
+            # Execute the selected action (all actions are valid)
             if action_from_agent < 4:  # Move bbox (0: Up, 1: Down, 2: Left, 3: Right)
                 if self.current_bbox:
                     old_potential = self._potential_function(self.current_bbox)
@@ -190,6 +186,7 @@ class ROIDetectionEnv(gym.Env):
                     current_reward_for_action = shaping_reward * self.shaping_coeff
                 else:
                     print("Warning: Agent tried to move a None or invalid current_bbox.")
+                    current_reward_for_action = -1  # Penalty for invalid action
                     
             elif action_from_agent == 4:  # Place bbox
                 current_reward_for_action = self._place_bbox()
@@ -199,10 +196,6 @@ class ROIDetectionEnv(gym.Env):
                 
             elif action_from_agent == 6:  # End episode
                 done = True
-                
-            else:
-                # This should not happen if the action space is respected
-                print(f"Warning: Invalid action {action_from_agent} received from agent.")
 
         # Calculate total reward for this step
         total_step_reward = current_reward_for_action
@@ -221,7 +214,6 @@ class ROIDetectionEnv(gym.Env):
 
             except Exception as e:
                 print(f"Error during final reward calculation: {e}")
-                total_step_reward += -10.0  # Fallback penalty
             
             # Add metrics to info dictionary
             info['metrics'] = metrics if metrics else {}
@@ -232,13 +224,6 @@ class ROIDetectionEnv(gym.Env):
         except Exception as e:
             print(f"Error getting observation: {e}")
             observation = self.observation_space.sample()  # Fallback
-
-        # Add action mask for next state to info
-        try:
-            info['action_mask'] = self._get_action_mask()
-        except Exception as e:
-            print(f"Error getting action_mask: {e}")
-            info['action_mask'] = np.ones(self.action_space.n, dtype=np.int8)  # Fallback
 
         return observation, total_step_reward, done, info
 
@@ -321,16 +306,18 @@ class ROIDetectionEnv(gym.Env):
             cv2.waitKey(1)
             return image_to_render
 
+    # Keep the action_masks method for compatibility
     def action_masks(self) -> np.ndarray:
         """
         Return the valid action mask for the current state.
         
-        This method is required by MaskablePPO and delegates to _get_action_mask.
+        This method is kept for compatibility but returns all ones since
+        we're treating all actions as valid.
         
         Returns:
-            np.ndarray: Binary mask with 1 for allowed actions, 0 for forbidden actions
+            np.ndarray: Binary mask with all 1s (all actions allowed)
         """
-        return self._get_action_mask()
+        return np.ones(self.action_space.n, dtype=np.int8)
 
     #---------------------------------------------------------------------------
     # Observation and action processing methods
@@ -390,75 +377,14 @@ class ROIDetectionEnv(gym.Env):
         """
         Compute the action mask for the current state.
         
-        The mask determines which actions are valid in the current state:
-        - Movement actions are masked if at image boundaries
-        - Place action is masked if max boxes reached or placing on an existing box
-        - Remove action is masked if no boxes are placed
+        Since we're treating all actions as valid, this returns all ones.
+        Kept for compatibility with original code.
         
         Returns:
-            np.ndarray: Binary mask with 1 for allowed actions, 0 for forbidden actions
+            np.ndarray: Binary mask with all 1s (all actions allowed)
         """
-        # Start with all actions allowed (1 = allowed)
-        mask = np.ones(self.action_space.n, dtype=np.int8)
-
-        # Basic error handling for edge cases
-        if self.bbox_size is None or self.current_bbox is None:
-            print("Warning: bbox_size or current_bbox is None in _get_action_mask.")
-            return mask  # Return all actions enabled as a fallback
-        if not (len(self.bbox_size) == 2 and len(self.current_bbox) == 4):
-            print("Warning: bbox_size or current_bbox has unexpected format.")
-            return mask  # Return all actions enabled as a fallback
-
-        # --- Check Movement Boundaries ---
-        epsilon = 1e-6  # Tolerance for floating point comparisons
-        
-        # Disable up movement if at top boundary
-        if self.current_bbox[1] <= epsilon:
-            mask[0] = 0
-            
-        # Disable down movement if at bottom boundary
-        if self.current_bbox[1] >= self.image_size[1] - self.bbox_size[1] - epsilon:
-            mask[1] = 0
-            
-        # Disable left movement if at left boundary
-        if self.current_bbox[0] <= epsilon:
-            mask[2] = 0
-            
-        # Disable right movement if at right boundary
-        if self.current_bbox[0] >= self.image_size[0] - self.bbox_size[0] - epsilon:
-            mask[3] = 0
-
-        # --- Check Place Bbox Conditions (Action 4) ---
-        MAX_BBOXES = 100
-        IDENTICAL_PLACEMENT_IOU_THRESHOLD = 0.99
-        can_place = True
-        
-        # Condition 1: Max boxes limit reached?
-        if len(self.bboxes) >= MAX_BBOXES:
-            can_place = False
-        else:
-            # Condition 2: Trying to place exactly on top of an existing one?
-            for existing_bbox in self.bboxes:
-                try: 
-                    iou = self._calculate_iou(self.current_bbox, existing_bbox)
-                    if iou >= IDENTICAL_PLACEMENT_IOU_THRESHOLD:
-                        can_place = False
-                        break  # Found an identical placement, no need to check further
-                except Exception as e:
-                    print(f"Warning: Error calculating IoU in _get_action_mask: {e}")
-                    pass  # Continue checking other boxes
-                    
-        if not can_place:
-            mask[4] = 0  # Disable Place Bbox
-
-        # --- Check Remove Bbox Condition (Action 5) ---
-        if not self.bboxes:  # If no boxes have been placed
-            mask[5] = 0  # Disable Remove Bbox
-
-        # --- End Episode (Action 6) ---
-        # This action is typically always allowed (mask[6] remains 1)
-        
-        return mask
+        # Return all actions as valid
+        return np.ones(self.action_space.n, dtype=np.int8)
 
     def _process_tall_annotations(self) -> None:
         """
@@ -494,12 +420,16 @@ class ROIDetectionEnv(gym.Env):
             
         self.current_sample['annotations'] = processed_annotations
 
-    def _move_bbox(self, direction: int) -> None:
+    def _move_bbox(self, direction: int) -> float:
         """
         Move the current bounding box in the specified direction.
+        Returns a penalty if trying to move beyond image boundaries.
         
         Args:
             direction: Direction to move (0: Up, 1: Down, 2: Left, 3: Right)
+            
+        Returns:
+            float: Reward/penalty (0 for valid move, -1 for invalid move)
         """
         # Define step size for movement
         step_size = 8
@@ -508,147 +438,89 @@ class ROIDetectionEnv(gym.Env):
         if (self.bbox_size is None or len(self.bbox_size) != 2 or 
             self.current_bbox is None or len(self.current_bbox) != 4):
             print("Warning: bbox_size or current_bbox is invalid in _move_bbox.")
-            return
-
-        # Move in the specified direction with boundary checking
+            return -1.0
+        
+        # Check if movement would go beyond boundaries and apply penalty
         if direction == 0:  # Up
+            if self.current_bbox[1] <= 0:
+                return -1.0  # Already at top edge, can't move up
             self.current_bbox[1] = max(0, self.current_bbox[1] - step_size)
-            
+                
         elif direction == 1:  # Down
-            self.current_bbox[1] = min(
-                self.image_size[1] - self.bbox_size[1], 
-                self.current_bbox[1] + step_size
-            )
-            
+            bottom_edge = self.image_size[1] - self.bbox_size[1]
+            if self.current_bbox[1] >= bottom_edge:
+                return -1.0  # Already at bottom edge, can't move down
+            self.current_bbox[1] = min(bottom_edge, self.current_bbox[1] + step_size)
+                
         elif direction == 2:  # Left
+            if self.current_bbox[0] <= 0:
+                return -1.0  # Already at left edge, can't move left
             self.current_bbox[0] = max(0, self.current_bbox[0] - step_size)
-            
+                
         elif direction == 3:  # Right
-            self.current_bbox[0] = min(
-                self.image_size[0] - self.bbox_size[0], 
-                self.current_bbox[0] + step_size
-            )
+            right_edge = self.image_size[0] - self.bbox_size[0]
+            if self.current_bbox[0] >= right_edge:
+                return -1.0  # Already at right edge, can't move right
+            self.current_bbox[0] = min(right_edge, self.current_bbox[0] + step_size)
+        
+        # If we reach here, the move was valid
+        return 0.0
+
 
     def _place_bbox(self) -> float:
         """
         Place the current bounding box and calculate the resulting reward.
         
-        The reward is determined by:
-        1. How well the placed box covers actual annotations
-        2. How well it aligns with optimal ROIs
-        3. Penalties for overlapping with existing boxes
+        Logic:
+        1. Check if we've already placed 99 boxes (limit) - if so, return penalty
+        2. Place the box
+        3. Check for high overlap with existing boxes - if found, return penalty
+        4. Check IoU with optimal ROIs and return highest IoU * 10 as reward
         
         Returns:
             float: The reward for this action
         """
+        # 1. Check if already at max boxes (99)
+        if len(self.bboxes) >= 99:
+            return -1.0  # Penalty for exceeding limit
+        
         # Create a copy of the current bbox to place
         current_bbox_to_place = self.current_bbox.copy()
-        reward = 0.0
-
-        # Define reward parameters
-        IOU_THRESHOLD_FOR_GOOD_PLACEMENT = 0.5
-        REWARD_FACTOR_ANNOTATION = 15.0
-        REWARD_FACTOR_OPTIMAL_ROI = 5.0
-        PENALTY_NO_COVERAGE = -0.2
-        OVERLAP_THRESHOLD_FOR_PENALTY = 0.7
-        OVERLAP_PENALTY_VALUE = -1.0
-
-        # --- 1. Check coverage of ground truth annotations ---
-        covered_any_annotation = False
-        max_iou_with_annotation = 0.0
-
-        if self.current_sample and 'annotations' in self.current_sample:
-            for ann in self.current_sample['annotations']:
-                ann_bbox = ann['bbox']
-                iou_with_ann = self._calculate_iou(current_bbox_to_place, ann_bbox)
-
-                if iou_with_ann > IOU_THRESHOLD_FOR_GOOD_PLACEMENT:
-                    covered_any_annotation = True
-                    max_iou_with_annotation = max(max_iou_with_annotation, iou_with_ann)
-
-        # --- 2. Check IoU with optimal ROIs (secondary objective) ---
+        
+        # 2. Place the bbox (add to list)
+        self.bboxes.append(current_bbox_to_place)
+        
+        # 3. Check for high overlap with existing boxes (except the one we just placed)
+        for existing_bbox in self.bboxes[:-1]:  # Skip the last one (just placed)
+            iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
+            if iou_with_existing > 0.9:
+                return -1.0  # Penalty for high overlap
+        
+        # 4. Check IoU with each optimal ROI and return highest * 10 as reward
         max_iou_with_optimal = 0.0
-        covered_optimal_roi = False
-
+        
         if self.optimal_rois:
             for opt_roi in self.optimal_rois:
                 iou_val = self._calculate_iou(current_bbox_to_place, opt_roi)
-                if iou_val > IOU_THRESHOLD_FOR_GOOD_PLACEMENT:
-                    covered_optimal_roi = True
-                    max_iou_with_optimal = max(max_iou_with_optimal, iou_val)
+                max_iou_with_optimal = max(max_iou_with_optimal, iou_val)
+        
+        # Return reward as highest IoU with optimal ROI * 10
+        return max_iou_with_optimal * 10.0
 
-        # --- 3. Determine reward based on coverage ---
-        if covered_any_annotation:
-            # Primary reward: Box covers actual annotations
-            reward += max_iou_with_annotation * REWARD_FACTOR_ANNOTATION
-        elif covered_optimal_roi:
-            # Secondary reward: Box covers an optimal ROI
-            reward += max_iou_with_optimal * REWARD_FACTOR_OPTIMAL_ROI
-        else:
-            # Penalty: Box doesn't cover anything useful
-            reward += PENALTY_NO_COVERAGE
-
-        # # --- 4. Apply penalty for overlap with existing boxes ---
-        # overlap_penalty_accumulator = 0.0
-        # for existing_bbox in self.bboxes:
-        #     iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
-        #     if iou_with_existing > OVERLAP_THRESHOLD_FOR_PENALTY:
-        #         overlap_penalty_accumulator += OVERLAP_PENALTY_VALUE
-
-        # reward += overlap_penalty_accumulator
-
-        # --- 5. Add the bbox to the list of placed boxes ---
-        self.bboxes.append(current_bbox_to_place)
-
-        return reward
-    
     def _remove_bbox(self) -> float:
         """
         Remove the last placed bounding box and calculate the resulting reward.
-        
-        The reward encourages removing "bad" boxes and penalizes removing "good" boxes.
         
         Returns:
             float: The reward for this action
         """
         # Check if there are any boxes to remove
         if not self.bboxes:
-            return -0.5  # Penalty if nothing to remove
+            return -1  # Penalty if nothing to remove
             
-        # Get the box that will be removed (last placed)
-        last_bbox = self.bboxes[-1]
-
-        # Evaluate the quality of the box being removed
-        is_good_box = False
-        max_iou_with_anything_useful = 0.0
-        IOU_CONSIDERED_GOOD = 0.4  # Threshold for "good" box
-
-        # Check IoU with optimal ROIs
-        if self.optimal_rois:
-            for opt_roi in self.optimal_rois:
-                iou = self._calculate_iou(last_bbox, opt_roi)
-                max_iou_with_anything_useful = max(max_iou_with_anything_useful, iou)
-
-        # Check IoU with annotations
-        if self.current_sample and 'annotations' in self.current_sample:
-            for ann in self.current_sample['annotations']:
-                iou = self._calculate_iou(last_bbox, ann['bbox'])
-                max_iou_with_anything_useful = max(max_iou_with_anything_useful, iou)
-
-        # Determine if this is a "good" box
-        if max_iou_with_anything_useful > IOU_CONSIDERED_GOOD:
-            is_good_box = True
-
         # Remove the box
         self.bboxes.pop()
-
-        # Return appropriate reward
-        if is_good_box:
-            # Significant penalty for removing a good box
-            return -max_iou_with_anything_useful * 10.0
-        else:
-            # Small reward for removing a bad box
-            return 0.05  # Small positive reward, but not exploitable
+        return 0.0
 
     #---------------------------------------------------------------------------
     # ROI and reward calculation methods
@@ -901,8 +773,8 @@ class ROIDetectionEnv(gym.Env):
         placed_count = len(self.bboxes)
 
         # Calculate final reward with weights for different components
-        coverage_weight = 80.0
-        matching_weight = 20.0
+        coverage_weight = 70.0
+        matching_weight = 30.0
         
         final_reward_val = (
             coverage_score * coverage_weight +
@@ -974,38 +846,6 @@ class ROIDetectionEnv(gym.Env):
         
         # Average the best IoUs
         return total_max_iou_sum / len(optimal_rois_list)
-
-    def _calculate_roi_overlap_penalty(self, rois_list: List[List[float]]) -> float:
-        """
-        Calculate penalty for excessive overlap between placed ROIs.
-        
-        This discourages redundant placements of ROIs in the same area.
-        
-        Args:
-            rois_list: List of ROIs to check for overlap [x, y, w, h]
-            
-        Returns:
-            float: Overlap penalty value between 0 and 1
-        """
-        if len(rois_list) <= 1:
-            return 0.0  # No overlap possible with 0 or 1 ROI
-        
-        total_overlap_iou = 0.0
-        num_pairs = 0
-        
-        # Check each pair of ROIs for overlap
-        for i in range(len(rois_list)):
-            for j in range(i + 1, len(rois_list)):
-                iou = self._calculate_iou(rois_list[i], rois_list[j])
-                
-                # Only penalize significant overlap
-                if iou > 0.3:
-                    total_overlap_iou += iou
-                    
-                num_pairs += 1
-        
-        # Cap the penalty at 1.0
-        return min(1.0, total_overlap_iou)
 
     #---------------------------------------------------------------------------
     # Utility methods
