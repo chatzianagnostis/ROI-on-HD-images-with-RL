@@ -302,19 +302,6 @@ class ROIDetectionEnv(gym.Env):
             cv2.waitKey(1)
             return image_to_render
 
-    # Keep the action_masks method for compatibility
-    def action_masks(self) -> np.ndarray:
-        """
-        Return the valid action mask for the current state.
-        
-        This method is kept for compatibility but returns all ones since
-        we're treating all actions as valid.
-        
-        Returns:
-            np.ndarray: Binary mask with all 1s (all actions allowed)
-        """
-        return np.ones(self.action_space.n, dtype=np.int8)
-
     #---------------------------------------------------------------------------
     # Observation and action processing methods
     #---------------------------------------------------------------------------
@@ -368,19 +355,6 @@ class ROIDetectionEnv(gym.Env):
             'image': image.astype(np.uint8),
             'bbox_state': bbox_state
         }
-
-    def _get_action_mask(self) -> np.ndarray:
-        """
-        Compute the action mask for the current state.
-        
-        Since we're treating all actions as valid, this returns all ones.
-        Kept for compatibility with original code.
-        
-        Returns:
-            np.ndarray: Binary mask with all 1s (all actions allowed)
-        """
-        # Return all actions as valid
-        return np.ones(self.action_space.n, dtype=np.int8)
 
     def _process_tall_annotations(self) -> None:
         """
@@ -471,7 +445,7 @@ class ROIDetectionEnv(gym.Env):
         1. Check if we've already placed 99 boxes (limit) - if so, return penalty
         2. Place the box
         3. Check for high overlap with existing boxes - if found, return penalty
-        4. Check IoU with optimal ROIs and return highest IoU * 10 as reward
+        4. Check IoU with optimal ROIs and return (highest IoU - highest IoU with already placed bboxes) * 10 as reward
         
         Returns:
             float: The reward for this action
@@ -504,7 +478,17 @@ class ROIDetectionEnv(gym.Env):
                 max_iou_with_optimal = max(max_iou_with_optimal, iou_val)
         
         if max_iou_with_optimal == 0.0:
-            return -0.1
+           
+            # Calculate Manhattan distance to nearest optimal ROI
+            min_distance = self._dist_to_nearest_unmatched_opt_roi(current_bbox_to_place)
+
+            # Normalize distance reward (higher distance = higher reward for removal)
+            # Scale by image size to normalize
+            max_possible_distance = self.image_size[0] + self.image_size[1]  # Max Manhattan distance
+            normalized_distance = min_distance / max_possible_distance if max_possible_distance > 0 else 0
+            # Return reward proportional to distance (removing far boxes is good)
+            return - normalized_distance * 2.0
+
         else:
             # Return reward as highest IoU with optimal ROI - iou_with_existing * 10
             return (max_iou_with_optimal - iou_with_existing) * 10.0
@@ -538,7 +522,7 @@ class ROIDetectionEnv(gym.Env):
 
         # If the removed box had high IoU with optimal ROI, penalize
         if max_iou_with_optimal > 0.5:
-            return -max_iou_with_optimal  # Penalty for removing a well-positioned box
+            return -max_iou_with_optimal * 10  # Penalty for removing a well-positioned box
         else:
             # Calculate Manhattan distance to nearest optimal ROI
             min_distance = self._dist_to_nearest_unmatched_opt_roi(bbox_to_remove)
@@ -549,7 +533,7 @@ class ROIDetectionEnv(gym.Env):
             normalized_distance = min_distance / max_possible_distance if max_possible_distance > 0 else 0
             
             # Return reward proportional to distance (removing far boxes is good)
-            return normalized_distance * 2.0  # Scale factor for reward magnitude
+            return normalized_distance * 2.0
 
 
     #---------------------------------------------------------------------------
