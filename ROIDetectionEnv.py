@@ -71,7 +71,7 @@ class ROIDetectionEnv(gym.Env):
         self.action_space = spaces.Discrete(7)
 
         # Reward shaping parameters
-        self.shaping_coeff = 0.00  # Coefficient for shaping reward
+        self.shaping_coeff = 0.01  # Coefficient for shaping reward
         self.gamma_potential_shaping = 0.995  # Discount factor for potential shaping
         
         # Observation space: image and current bbox state
@@ -178,16 +178,12 @@ class ROIDetectionEnv(gym.Env):
 
             # Execute the selected action (all actions are valid)
             if action_from_agent < 4:  # Move bbox (0: Up, 1: Down, 2: Left, 3: Right)
-                if self.current_bbox:
-                    old_potential = self._potential_function(self.current_bbox)
-                    self._move_bbox(action_from_agent)
-                    new_potential = self._potential_function(self.current_bbox)
-                    shaping_reward = self.gamma_potential_shaping * new_potential - old_potential
-                    current_reward_for_action = shaping_reward * self.shaping_coeff
-                else:
-                    print("Warning: Agent tried to move a None or invalid current_bbox.")
-                    current_reward_for_action = -1  # Penalty for invalid action
-                    
+                old_potential = self._potential_function(self.current_bbox)
+                self._move_bbox(action_from_agent)
+                new_potential = self._potential_function(self.current_bbox)
+                shaping_reward = self.gamma_potential_shaping * new_potential - old_potential
+                current_reward_for_action = shaping_reward * self.shaping_coeff
+                
             elif action_from_agent == 4:  # Place bbox
                 current_reward_for_action = self._place_bbox()
                 
@@ -480,23 +476,26 @@ class ROIDetectionEnv(gym.Env):
         Returns:
             float: The reward for this action
         """
-        # 1. Check if already at max boxes (99)
+        # Check if already at max boxes (99)
         if len(self.bboxes) >= 99:
-            return -1.0  # Penalty for exceeding limit
+            return -20.0  # Penalty for exceeding limit
         
         # Create a copy of the current bbox to place
         current_bbox_to_place = self.current_bbox.copy()
         
-        # 2. Place the bbox (add to list)
+        # Place the bbox (add to list)
         self.bboxes.append(current_bbox_to_place)
         
-        # 3. Check for high overlap with existing boxes (except the one we just placed)
+        # Check for high overlap with existing boxes (except the one we just placed)
+        iou_with_existings = []
         for existing_bbox in self.bboxes[:-1]:  # Skip the last one (just placed)
-            iou_with_existing = self._calculate_iou(current_bbox_to_place, existing_bbox)
-            if iou_with_existing > 0.9:
-                return -1.0  # Penalty for high overlap
-        
-        # 4. Check IoU with each optimal ROI and return highest * 10 as reward
+            iou_with_existings.append(self._calculate_iou(current_bbox_to_place, existing_bbox))
+
+        iou_with_existing = max(iou_with_existings) if iou_with_existings else 0.0
+        if iou_with_existing > 0.5:
+            return -iou_with_existing  # Penalty for high overlap
+    
+        # Check IoU with each optimal ROI and return highest * 10 as reward
         max_iou_with_optimal = 0.0
         
         if self.optimal_rois:
@@ -504,23 +503,54 @@ class ROIDetectionEnv(gym.Env):
                 iou_val = self._calculate_iou(current_bbox_to_place, opt_roi)
                 max_iou_with_optimal = max(max_iou_with_optimal, iou_val)
         
-        # Return reward as highest IoU with optimal ROI * 10
-        return max_iou_with_optimal * 10.0
+        if max_iou_with_optimal == 0.0:
+            return -0.1
+        else:
+            # Return reward as highest IoU with optimal ROI - iou_with_existing * 10
+            return (max_iou_with_optimal - iou_with_existing) * 10.0
 
     def _remove_bbox(self) -> float:
         """
         Remove the last placed bounding box and calculate the resulting reward.
+        
+        Logic:
+        - If removing a bbox with high IoU (>0.5) with optimal ROI: penalize by IoU value
+        - If removing a bbox with low IoU with optimal ROIs: reward based on distance to nearest optimal ROI
         
         Returns:
             float: The reward for this action
         """
         # Check if there are any boxes to remove
         if not self.bboxes:
-            return -1  # Penalty if nothing to remove
+            return -0.1  # Penalty if nothing to remove
             
+        # Get the bbox that will be removed (last one)
+        bbox_to_remove = self.bboxes[-1]
         # Remove the box
         self.bboxes.pop()
-        return 0.0
+
+        # Calculate IoU with all optimal ROIs
+        max_iou_with_optimal = 0.0
+        if self.optimal_rois:
+            for opt_roi in self.optimal_rois:
+                iou_val = self._calculate_iou(bbox_to_remove, opt_roi)
+                max_iou_with_optimal = max(max_iou_with_optimal, iou_val)
+
+        # If the removed box had high IoU with optimal ROI, penalize
+        if max_iou_with_optimal > 0.5:
+            return -max_iou_with_optimal  # Penalty for removing a well-positioned box
+        else:
+            # Calculate Manhattan distance to nearest optimal ROI
+            min_distance = self._dist_to_nearest_unmatched_opt_roi(bbox_to_remove)
+
+            # Normalize distance reward (higher distance = higher reward for removal)
+            # Scale by image size to normalize
+            max_possible_distance = self.image_size[0] + self.image_size[1]  # Max Manhattan distance
+            normalized_distance = min_distance / max_possible_distance if max_possible_distance > 0 else 0
+            
+            # Return reward proportional to distance (removing far boxes is good)
+            return normalized_distance * 2.0  # Scale factor for reward magnitude
+
 
     #---------------------------------------------------------------------------
     # ROI and reward calculation methods
