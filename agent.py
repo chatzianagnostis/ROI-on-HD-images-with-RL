@@ -1,8 +1,5 @@
 """
-Region of Interest Detection Agent using standard PPO.
-
-This module implements a reinforcement learning agent and feature extractor
-for training models to detect regions of interest in images.
+Region of Interest Detection Agent using DINOv2.
 """
 
 import os
@@ -11,7 +8,6 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import torch
 import torch.nn as nn
-from torchvision import models
 from gym import spaces
 
 from stable_baselines3 import PPO
@@ -24,7 +20,7 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
     """
     Feature extractor for the ROI Detection environment.
     
-    This class uses a pre-trained ResNet18 with frozen early layers to efficiently
+    This class uses a pre-trained DINOv2-ViT-B/14 with frozen weights to efficiently
     extract features from images, combined with a separate network to process
     bounding box states. The outputs are concatenated and passed through a
     final linear layer to produce a unified feature representation.
@@ -41,14 +37,19 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         super(ROIFeatureExtractor, self).__init__(observation_space, features_dim)
         
         # ----- Image Processing Network -----
-        # Load ResNet18 and remove final FC layer
-        self.cnn = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        # Keep everything except the final fully connected layer
-        self.cnn = nn.Sequential(*list(self.cnn.children())[:-1])
+        # Load DINOv2-ViT-B/14 pretrained model
+        print("Loading DINOv2-ViT-B/14...")
+        self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14', pretrained=True)
         
-        # Freeze the ENTIRE ResNet18 - no fine tuning
-        for param in self.cnn.parameters():
+        # Freeze the ENTIRE DINOv2 - no fine tuning
+        for param in self.dinov2.parameters():
             param.requires_grad = False
+        
+        self.dinov2.eval()
+        
+        # Register ImageNet normalization buffers for DINOv2
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         
         # ----- Bounding Box State Processing Network -----
         # Calculate input dimension from the observation space
@@ -61,11 +62,29 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         )
         
         # ----- Combined Features Network -----
-        # ResNet18 outputs 512-dimensional vectors before the FC layer
+        # DINOv2-ViT-B/14 outputs 768-dimensional vectors
         self.combined_layer = nn.Sequential(
-            nn.Linear(512 + 64, features_dim),
+            nn.Linear(768 + 64, features_dim),
             nn.ReLU()
         )
+    
+    def preprocess_image(self, image: torch.Tensor) -> torch.Tensor:
+        """
+        Preprocess image for DINOv2.
+        Applies ImageNet normalization required by DINOv2.
+        """
+        # Normalize to [0, 1] range if needed
+        if image.max() > 1.0:
+            image = image.float() / 255.0
+
+        # Resize to dimensions divisible by 14 (patch size)
+        import torch.nn.functional as F
+        image = F.interpolate(image, size=(644, 644), mode='bilinear', align_corners=False)
+        
+        # Apply ImageNet normalization (required for DINOv2)
+        image = (image - self.mean) / self.std
+        
+        return image
         
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -80,12 +99,12 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         # ----- Process Image -----
         image = observations['image']  # Shape: (N, H, W, C) or (N, C, H, W)
         
-        # Normalize images to [0, 1] range
-        image = image.float() / 255.0
+        # Preprocess for DINOv2
+        image = self.preprocess_image(image)
         
-        # Extract image features
-        image_features = self.cnn(image)
-        image_features = torch.flatten(image_features, start_dim=1)
+        # Extract image features using DINOv2
+        with torch.no_grad():
+            image_features = self.dinov2(image)  # Output: (N, 768)
         
         # ----- Process Bounding Box State -----
         bbox_state = observations['bbox_state'].float()
@@ -147,8 +166,8 @@ class ROIAgent:
             "learning_rate": learning_rate,
             
             # Sample collection parameters
-            "n_steps": 1024,
-            "batch_size": 64,
+            "n_steps": 512,
+            "batch_size": 16,
             
             # Training parameters
             "n_epochs": 10,
