@@ -7,7 +7,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 # from utils.loggers import TrainingLogger
 
 # Import required classes
-from ROIDataset import ROIDataset # Assuming this file exists and is correct
+from ROIDataset import ROIDataset
 from ROIDetectionEnv import ROIDetectionEnv
 from agent import ROIAgent
 
@@ -39,7 +39,7 @@ def main():
     dataset = ROIDataset(
         dataset_path=dataset_path,
         coco_json_path=coco_json_path,
-        image_size=(640, 640), # Image size for resizing
+        image_size=(644, 644), # Image size for resizing
         annotations_format="coco",
         shuffle=True
     )
@@ -47,7 +47,7 @@ def main():
     # Create environment
     env = ROIDetectionEnv(
         dataset=dataset,
-        crop_size=(640, 640), # Crop size for ROIs (should relate to model if patches are extracted)
+        crop_size=(644, 644), # Crop size for ROIs (should relate to model if patches are extracted)
         time_limit=60  # 1 minute per episode (adjust as needed)
     )
     

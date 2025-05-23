@@ -87,7 +87,12 @@ class ROIDetectionEnv(gym.Env):
                 high=1, 
                 shape=(100, 4),  # max 100 bboxes
                 dtype=np.float32
-            )
+            ),
+            'current_bbox': spaces.Box(
+                low=0, 
+                high=1, 
+                shape=(4,), 
+                dtype=np.float32)
         })
 
     def reset(self) -> Dict[str, np.ndarray]:
@@ -305,55 +310,34 @@ class ROIDetectionEnv(gym.Env):
     #---------------------------------------------------------------------------
     # Observation and action processing methods
     #---------------------------------------------------------------------------
-    
     def _get_observation(self) -> Dict[str, np.ndarray]:
-        """
-        Get the current observation.
-        
-        Returns:
-            Dict containing:
-                - 'image': The current image with all bounding boxes drawn
-                - 'bbox_state': Normalized coordinates of all placed bboxes
-        """
-        # Create a copy of the current image to draw on
+        # Καθαρή εικόνα - ΧΩΡΙΣ σχεδιασμένα boxes!
         image = self.current_image.copy()
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        # Draw all placed bboxes in green
-        for bbox in self.bboxes:
-            cv2.rectangle(
-                image, 
-                (int(bbox[0]), int(bbox[1])), 
-                (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])),
-                (0, 255, 0),  # Green color
-                2  # Line thickness
-            )
-        
-        # Draw current movable bbox in blue
-        if self.current_bbox and len(self.current_bbox) == 4:
-            cv2.rectangle(
-                image,
-                (int(self.current_bbox[0]), int(self.current_bbox[1])),
-                (int(self.current_bbox[0] + self.current_bbox[2]), 
-                 int(self.current_bbox[1] + self.current_bbox[3])),
-                (255, 0, 0),  # Blue color
-                2  # Line thickness
-            )
-        
-        # Prepare the bbox_state array (normalized coordinates of placed bboxes)
+        # Placed boxes ως structured data
         bbox_state = np.zeros((100, 4), dtype=np.float32)
         for i, bbox in enumerate(self.bboxes):
-            if i < 100:  # Max 100 bboxes in the state
-                # Normalize coordinates to [0, 1] range
+            if i < 100:
                 bbox_state[i] = [
-                    bbox[0] / self.image_size[0],  # x / width
-                    bbox[1] / self.image_size[1],  # y / height
-                    bbox[2] / self.image_size[0],  # w / width
-                    bbox[3] / self.image_size[1]   # h / height
+                    bbox[0] / self.image_size[0],
+                    bbox[1] / self.image_size[1], 
+                    bbox[2] / self.image_size[0],
+                    bbox[3] / self.image_size[1]
                 ]
+        
+        # Current box ως structured data
+        current_bbox_norm = np.array([
+            self.current_bbox[0] / self.image_size[0],
+            self.current_bbox[1] / self.image_size[1],
+            self.current_bbox[2] / self.image_size[0], 
+            self.current_bbox[3] / self.image_size[1]
+        ], dtype=np.float32)
         
         return {
             'image': image.astype(np.uint8),
-            'bbox_state': bbox_state
+            'bbox_state': bbox_state,
+            'current_bbox': current_bbox_norm
         }
 
     def _process_tall_annotations(self) -> None:
@@ -486,8 +470,8 @@ class ROIDetectionEnv(gym.Env):
             # Scale by image size to normalize
             max_possible_distance = self.image_size[0] + self.image_size[1]  # Max Manhattan distance
             normalized_distance = min_distance / max_possible_distance if max_possible_distance > 0 else 0
-            # Return reward proportional to distance (removing far boxes is good)
-            return - normalized_distance * 2.0
+            # Return penalty proportional to distance (placing far boxes is bad)
+            return - normalized_distance * 2.0 
 
         else:
             # Return reward as highest IoU with optimal ROI - iou_with_existing * 10
@@ -522,7 +506,7 @@ class ROIDetectionEnv(gym.Env):
 
         # If the removed box had high IoU with optimal ROI, penalize
         if max_iou_with_optimal > 0.5:
-            return -max_iou_with_optimal * 10  # Penalty for removing a well-positioned box
+            return -max_iou_with_optimal * 10 - 0.2  # Penalty for removing a well-positioned box
         else:
             # Calculate Manhattan distance to nearest optimal ROI
             min_distance = self._dist_to_nearest_unmatched_opt_roi(bbox_to_remove)
@@ -533,7 +517,7 @@ class ROIDetectionEnv(gym.Env):
             normalized_distance = min_distance / max_possible_distance if max_possible_distance > 0 else 0
             
             # Return reward proportional to distance (removing far boxes is good)
-            return normalized_distance * 2.0
+            return normalized_distance * 2.0 - 0.2
 
 
     #---------------------------------------------------------------------------

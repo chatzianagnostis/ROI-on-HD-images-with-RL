@@ -53,11 +53,13 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         
         # ----- Bounding Box State Processing Network -----
         # Calculate input dimension from the observation space
-        bbox_input_dim = np.prod(observation_space.spaces['bbox_state'].shape)
-        
+        bbox_state_dim = np.prod(observation_space.spaces['bbox_state'].shape)  # 400
+        current_bbox_dim = np.prod(observation_space.spaces['current_bbox'].shape)  # 4
+        bbox_input_dim = bbox_state_dim + current_bbox_dim  # 404
+
         self.bbox_encoder = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(bbox_input_dim, 64),
+            nn.Linear(bbox_input_dim, 64),  # 404 -> 64
             nn.ReLU()
         )
         
@@ -78,8 +80,8 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
             image = image.float() / 255.0
 
         # Resize to dimensions divisible by 14 (patch size)
-        import torch.nn.functional as F
-        image = F.interpolate(image, size=(644, 644), mode='bilinear', align_corners=False)
+        # import torch.nn.functional as F
+        # image = F.interpolate(image, size=(644, 644), mode='bilinear', align_corners=False)
         
         # Apply ImageNet normalization (required for DINOv2)
         image = (image - self.mean) / self.std
@@ -87,30 +89,25 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         return image
         
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Process observations through the feature extractor.
-        
-        Args:
-            observations: Dictionary containing 'image' and 'bbox_state'
-            
-        Returns:
-            torch.Tensor: Extracted features of dimension features_dim
-        """
-        # ----- Process Image -----
-        image = observations['image']  # Shape: (N, H, W, C) or (N, C, H, W)
-        
-        # Preprocess for DINOv2
+        # Image features (καθαρή εικόνα!)
+        image = observations['image']
         image = self.preprocess_image(image)
-        
-        # Extract image features using DINOv2
         with torch.no_grad():
-            image_features = self.dinov2(image)  # Output: (N, 768)
+            image_features = self.dinov2(image)
         
-        # ----- Process Bounding Box State -----
+        # Bbox features (placed + current)
         bbox_state = observations['bbox_state'].float()
-        bbox_features = self.bbox_encoder(bbox_state)
+        current_bbox = observations['current_bbox'].float()
         
-        # ----- Combine Features -----
+        # Combine bbox info
+        bbox_combined = torch.cat([
+            bbox_state.flatten(start_dim=1),  # Flatten (N, 100, 4) -> (N, 400)
+            current_bbox                      # (N, 4)
+        ], dim=1)
+        
+        bbox_features = self.bbox_encoder(bbox_combined)
+        
+        # Final combination
         combined = torch.cat([image_features, bbox_features], dim=1)
         return self.combined_layer(combined)
 
@@ -156,7 +153,7 @@ class ROIAgent:
         self.model_dir = model_dir
         self.log_dir = log_dir
 
-        net_arch = dict(pi=[1024, 512, 256], vf=[1024, 512, 256]) 
+        net_arch = dict(pi=[1024, 1024, 512, 256], vf=[1024, 1024, 512, 256]) 
         
         # Configure PPO hyperparameters
         ppo_params = {
@@ -166,7 +163,7 @@ class ROIAgent:
             "learning_rate": learning_rate,
             
             # Sample collection parameters
-            "n_steps": 512,
+            "n_steps": 1024,
             "batch_size": 16,
             
             # Training parameters
@@ -175,9 +172,9 @@ class ROIAgent:
             "gae_lambda": 0.995,
             "ent_coef": 0.0005,
             "clip_range": 0.2,
-            "vf_coef": 0.005,
-            "max_grad_norm": 0.5,
-            "normalize_advantage": True,
+            "vf_coef": 0.0005,
+            # "max_grad_norm": 0.5,
+            # "normalize_advantage": True,
             
             # Miscellaneous
             "verbose": 2,
