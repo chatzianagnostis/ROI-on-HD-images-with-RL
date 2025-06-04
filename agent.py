@@ -1,5 +1,6 @@
 """
 Region of Interest Detection Agent using DINOv2.
+Enhanced with action history support.
 """
 
 import os
@@ -18,12 +19,11 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 class ROIFeatureExtractor(BaseFeaturesExtractor):
     """
-    Feature extractor for the ROI Detection environment.
+    Enhanced feature extractor for the ROI Detection environment.
     
     This class uses a pre-trained DINOv2-ViT-B/14 with frozen weights to efficiently
-    extract features from images, combined with a separate network to process
-    bounding box states. The outputs are concatenated and passed through a
-    final linear layer to produce a unified feature representation.
+    extract features from images, combined with separate networks to process
+    bounding box states, action history, position history, and movement patterns.
     """
     
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
@@ -36,8 +36,7 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         """
         super(ROIFeatureExtractor, self).__init__(observation_space, features_dim)
         
-        # ----- Image Processing Network -----
-        # Load DINOv2-ViT-B/14 pretrained model
+        # ----- Image Processing Network (DINOv2) -----
         print("Loading DINOv2-ViT-B/14...")
         self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14', pretrained=True)
         
@@ -52,7 +51,6 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         
         # ----- Bounding Box State Processing Network -----
-        # Calculate input dimension from the observation space
         bbox_state_dim = np.prod(observation_space.spaces['bbox_state'].shape)  # 400
         current_bbox_dim = np.prod(observation_space.spaces['current_bbox'].shape)  # 4
         bbox_input_dim = bbox_state_dim + current_bbox_dim  # 404
@@ -63,11 +61,49 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
             nn.ReLU()
         )
         
-        # ----- Combined Features Network -----
-        # DINOv2-ViT-B/14 outputs 768-dimensional vectors
-        self.combined_layer = nn.Sequential(
-            nn.Linear(768 + 64, features_dim),
+        # ----- NEW: Action History Processing -----
+        action_history_length = observation_space.spaces['action_history'].shape[0]
+        
+        # Embedding for actions (8 possible values: 0-6 + padding token 7)
+        self.action_embedding = nn.Embedding(8, 16)
+        
+        # LSTM for action sequence processing
+        self.action_lstm = nn.LSTM(
+            input_size=16,
+            hidden_size=32,
+            num_layers=1,
+            batch_first=True
+        )
+        
+        # ----- NEW: Position History Processing -----
+        if observation_space.spaces['position_history'].shape[0] > 1:  # If tracking positions
+            position_history_dim = np.prod(observation_space.spaces['position_history'].shape)
+            self.position_encoder = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(position_history_dim, 32),
+                nn.ReLU()
+            )
+            position_features_dim = 32
+        else:
+            self.position_encoder = None
+            position_features_dim = 0
+        
+        # ----- NEW: Movement Features Processing -----
+        movement_features_dim = observation_space.spaces['movement_features'].shape[0]
+        self.movement_encoder = nn.Sequential(
+            nn.Linear(movement_features_dim, 16),
             nn.ReLU()
+        )
+        
+        # ----- Combined Features Network -----
+        # Calculate total input dimension
+        # DINOv2: 768, bbox: 64, action LSTM: 32, position: 0-32, movement: 16
+        total_input_dim = 768 + 64 + 32 + position_features_dim + 16
+        
+        self.combined_layer = nn.Sequential(
+            nn.Linear(total_input_dim, features_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)  # Small dropout for regularization
         )
     
     def preprocess_image(self, image: torch.Tensor) -> torch.Tensor:
@@ -79,23 +115,21 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         if image.max() > 1.0:
             image = image.float() / 255.0
 
-        # Resize to dimensions divisible by 14 (patch size)
-        # import torch.nn.functional as F
-        # image = F.interpolate(image, size=(644, 644), mode='bilinear', align_corners=False)
-        
         # Apply ImageNet normalization (required for DINOv2)
         image = (image - self.mean) / self.std
         
         return image
         
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # Image features (καθαρή εικόνα!)
+        batch_size = observations['image'].shape[0]
+        
+        # ===== Process Image =====
         image = observations['image']
         image = self.preprocess_image(image)
         with torch.no_grad():
-            image_features = self.dinov2(image)
+            image_features = self.dinov2(image)  # (batch_size, 768)
         
-        # Bbox features (placed + current)
+        # ===== Process Bbox State =====
         bbox_state = observations['bbox_state'].float()
         current_bbox = observations['current_bbox'].float()
         
@@ -105,19 +139,56 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
             current_bbox                      # (N, 4)
         ], dim=1)
         
-        bbox_features = self.bbox_encoder(bbox_combined)
+        bbox_features = self.bbox_encoder(bbox_combined)  # (batch_size, 64)
         
-        # Final combination
-        combined = torch.cat([image_features, bbox_features], dim=1)
-        return self.combined_layer(combined)
+        # ===== NEW: Process Action History =====
+        action_history = observations['action_history'].long()  # (batch_size, seq_len)
+        
+        # Embed actions
+        action_embeddings = self.action_embedding(action_history)  # (batch_size, seq_len, 16)
+        
+        # Process with LSTM
+        lstm_out, (hidden, cell) = self.action_lstm(action_embeddings)
+        action_features = hidden[-1]  # Take last hidden state (batch_size, 32)
+        
+        # ===== NEW: Process Position History =====
+        if self.position_encoder is not None:
+            position_history = observations['position_history'].float()
+            position_features = self.position_encoder(position_history)  # (batch_size, 32)
+        else:
+            position_features = None
+        
+        # ===== NEW: Process Movement Features =====
+        movement_features_raw = observations['movement_features'].float()
+        movement_features = self.movement_encoder(movement_features_raw)  # (batch_size, 16)
+        
+        # ===== Combine All Features =====
+        features_to_combine = [
+            image_features,    # (batch_size, 768)
+            bbox_features,     # (batch_size, 64)
+            action_features,   # (batch_size, 32)
+            movement_features  # (batch_size, 16)
+        ]
+        
+        if position_features is not None:
+            features_to_combine.append(position_features)  # (batch_size, 32)
+        
+        combined = torch.cat(features_to_combine, dim=1)
+        
+        # Final processing
+        final_features = self.combined_layer(combined)  # (batch_size, features_dim)
+        
+        return final_features
+
 
 
 class ROIAgent:
     """
-    Agent for ROI Detection using standard PPO.
+    Enhanced Agent for ROI Detection using standard PPO with action history support.
     
     This class handles the training, saving, loading, and inference of a
-    reinforcement learning agent for the ROI detection task using standard PPO.
+    reinforcement learning agent for the ROI detection task using standard PPO
+    with enhanced observation processing.
     """
     
     def __init__(
@@ -153,9 +224,10 @@ class ROIAgent:
         self.model_dir = model_dir
         self.log_dir = log_dir
 
-        net_arch = dict(pi=[1024, 1024, 512, 256], vf=[1024, 1024, 512, 256]) 
+        # Network architecture - adjusted for enhanced features
+        net_arch = dict(pi=[512, 256, 128], vf=[512, 256, 128]) 
         
-        # Configure PPO hyperparameters
+        # Configure PPO hyperparameters (optimized for action history)
         ppo_params = {
             # Core components
             "policy": ActorCriticPolicy,
@@ -163,29 +235,28 @@ class ROIAgent:
             "learning_rate": learning_rate,
             
             # Sample collection parameters
-            "n_steps": 1024,
-            "batch_size": 16,
+            "n_steps": 512,        
+            "batch_size": 16,       # Increased for more stable updates
             
             # Training parameters
-            "n_epochs": 10,
-            "gamma": 0.995,
-            "gae_lambda": 0.995,
-            "ent_coef": 0.0005,
+            "n_epochs": 10,          
+            "gamma": 0.995,          # Standard discount factor
+            "gae_lambda": 0.95,     # Standard GAE lambda
+            "ent_coef": 0.01,       # Increased exploration for richer observation space
             "clip_range": 0.2,
-            "vf_coef": 0.0005,
-            # "max_grad_norm": 0.5,
-            # "normalize_advantage": True,
+            "vf_coef": 0.5,         # Standard value function coefficient
+            "max_grad_norm": 0.5,   # Gradient clipping
             
             # Miscellaneous
             "verbose": 2,
             "tensorboard_log": tensorboard_log,
             
-            # Custom feature extractor
+            # Custom feature extractor with action history support
             "policy_kwargs": {
                 "features_extractor_class": ROIFeatureExtractor,
                 "features_extractor_kwargs": {"features_dim": 256},
                 "activation_fn": torch.nn.ReLU,    
-                "optimizer_class": torch.optim.RAdam,
+                "optimizer_class": torch.optim.Adam,  # Standard Adam
                 "net_arch": net_arch,
             }
         }
@@ -229,17 +300,54 @@ class ROIAgent:
     def predict(self, observation: Dict[str, np.ndarray], deterministic: bool = True) -> np.ndarray:
         """
         Make a prediction with the model.
+        Enhanced to handle action history observations.
         
         Args:
-            observation: Environment observation
+            observation: Environment observation (with action history)
             deterministic: Whether to use deterministic actions (True for evaluation)
             
         Returns:
             np.ndarray: Selected action
         """
-        action, _states = self.model.predict(
-            observation,
-            deterministic=deterministic
-        )
+        # Handle both single observations and batched observations
+        obs_dict = {}
+        
+        # Convert image
+        if 'image' in observation:
+            if isinstance(observation['image'], np.ndarray):
+                if len(observation['image'].shape) == 3:  # Single image
+                    obs_dict['image'] = torch.tensor(observation['image']).unsqueeze(0).permute(0, 3, 1, 2)
+                else:  # Already batched
+                    obs_dict['image'] = torch.tensor(observation['image']).permute(0, 3, 1, 2)
+            else:
+                obs_dict['image'] = observation['image']
+        
+        # Convert bbox states
+        for key in ['bbox_state', 'current_bbox']:
+            if key in observation:
+                if isinstance(observation[key], np.ndarray):
+                    if len(observation[key].shape) == 1 and key == 'current_bbox':  # Single current_bbox
+                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
+                    elif len(observation[key].shape) == 2 and key == 'bbox_state':  # Single bbox_state
+                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
+                    else:  # Already batched
+                        obs_dict[key] = torch.tensor(observation[key])
+                else:
+                    obs_dict[key] = observation[key]
+        
+        # Convert action history components
+        for key in ['action_history', 'position_history', 'movement_features']:
+            if key in observation:
+                if isinstance(observation[key], np.ndarray):
+                    if len(observation[key].shape) == 1:  # Single observation
+                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
+                    else:  # Already batched or 2D
+                        obs_dict[key] = torch.tensor(observation[key])
+                        if len(obs_dict[key].shape) == 2 and key in ['position_history']:
+                            obs_dict[key] = obs_dict[key].unsqueeze(0)  # Add batch dimension
+                else:
+                    obs_dict[key] = observation[key]
+        
+        action, _states = self.model.predict(obs_dict, deterministic=deterministic)
         
         return action

@@ -8,7 +8,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 # Import required classes
 from ROIDataset import ROIDataset
-from ROIDetectionEnv import ROIDetectionEnv
+from env import ROIDetectionEnv
 from agent import ROIAgent
 
 os.environ['LOKY_MAX_CPU_COUNT'] = '4' # Setting for joblib, used by SB3 for parallel envs if applicable
@@ -35,7 +35,7 @@ def main():
     dataset_path = "G:\\rl\\overfit\\images"
     coco_json_path = "G:\\rl\\overfit\\overfit.json"
     
-    # Create dataset with 640x640 images
+    # Create dataset with 644x644 images
     dataset = ROIDataset(
         dataset_path=dataset_path,
         coco_json_path=coco_json_path,
@@ -48,37 +48,43 @@ def main():
     env = ROIDetectionEnv(
         dataset=dataset,
         crop_size=(644, 644), # Crop size for ROIs (should relate to model if patches are extracted)
-        time_limit=60  # 1 minute per episode (adjust as needed)
+        time_limit=30,  # Time limit for each episode
+        iou_threshold=0.5,
+        action_history_length=10,  # Length of action history to consider
+        track_positions=True,  # Track positions of ROIs
     )
     
-    print(f"Environment ready - dataset has {len(dataset)} samples") # Uses len(dataset)
+    print(f"Environment ready - dataset has {len(dataset)} samples")
+    print(f"Action history length: {env.action_history_length}")
+    print(f"Position tracking: {env.track_positions}")
     
     # 2. Create and train agent
     log_dir = "logs"  # Single log directory
     agent = ROIAgent(
         env=env,
         model_dir="models",
+        learning_rate=1e-4, # Learning rate for PPO
         log_dir=log_dir,
         tensorboard_log=log_dir # Use the same directory for TensorBoard
     )
     
     # Create a CheckpointCallback to save model periodically
     checkpoint_callback = CheckpointCallback(
-        save_freq=20000, # Save every 20000 steps
+        save_freq=5000, # Save every save_freq steps
         save_path="models/checkpoints/",
         name_prefix="roi_ppo_model", # Updated prefix
         verbose=2
     )
    
-    # Dynamic reward shaping callback (if you are using it)
-    from utils.callbacks import DynamicRewardShapingCallback # Make sure this import is active if using
-    shaping_callback = DynamicRewardShapingCallback(
-        check_freq=20000,
-        window_size=100,
-        initial_coeff=0.1, 
-        boost_coeff=0.5, 
-        verbose=1
-    )
+    # # Dynamic reward shaping callback (if you are using it)
+    # from utils.callbacks import DynamicRewardShapingCallback # Make sure this import is active if using
+    # shaping_callback = DynamicRewardShapingCallback(
+    #     check_freq=20000,
+    #     window_size=100,
+    #     initial_coeff=0.1, 
+    #     boost_coeff=0.5, 
+    #     verbose=1
+    # )
     
     # Training logger callback (if you are using it)
     from utils.loggers import TrainingLogger # Make sure this import is active if using
@@ -97,8 +103,8 @@ def main():
     print(f"Training completed in {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
     
     # Save final model
-    agent.save_model("final_roi_ppo_model") # Updated name
-    print("Final model saved to models/final_roi_ppo_model.zip")
+    agent.save_model("final_roi_history_model") # Updated name
+    print("Final model saved to models/final_roi_history_model.zip")
 
 if __name__ == "__main__":
     main()

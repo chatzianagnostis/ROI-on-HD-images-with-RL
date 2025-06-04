@@ -11,7 +11,7 @@ from agent import ROIAgent
 dataset = ROIDataset(
     dataset_path="G:\\rl\\overfit\\images",
     coco_json_path="G:\\rl\\overfit\\overfit.json",
-    image_size=(640, 640),
+    image_size=(644, 644),
     annotations_format="coco",
     shuffle=True
 )
@@ -19,13 +19,13 @@ dataset = ROIDataset(
 # Create the basic environment
 env = ROIDetectionEnv(
     dataset=dataset,
-    crop_size=(640, 640),
+    crop_size=(644, 644),
     time_limit=60
 )
 
 # Load trained agent
 agent = ROIAgent(env)
-agent.load_model("checkpoints/roi_ppo_model_60000_steps")  # Updated model name
+agent.load_model("final_roi_ppo_model")  # Updated model name
 
 # Create output directory for videos
 output_dir = "evaluation_videos"
@@ -82,8 +82,9 @@ for episode in range(num_episodes):
         # Convert observation to the format expected by the model
         # (batched tensor with correct dimensions)
         obs_dict = {
-            'image': torch.tensor(obs['image']).unsqueeze(0).permute(0, 3, 1, 2),
-            'bbox_state': torch.tensor(obs['bbox_state']).unsqueeze(0)
+            'image': torch.tensor(obs['image']).unsqueeze(0).permute(0, 3, 1, 2).float(),
+            'bbox_state': torch.tensor(obs['bbox_state']).unsqueeze(0).float(),
+            'current_bbox': torch.tensor(obs['current_bbox']).unsqueeze(0).float()
         }
         
         # Standard prediction (no action masks)
