@@ -1,7 +1,7 @@
 """
 Region of Interest Detection Environment for Reinforcement Learning.
 
-This module implements a Gym environment for training agents to detect regions of interest
+This module implements a Gymnasium environment for training agents to detect regions of interest
 in images using reinforcement learning. The agent learns to place bounding boxes (ROIs)
 to cover annotations in the images.
 
@@ -13,14 +13,14 @@ from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from collections import deque
 
 import numpy as np
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import cv2
 
 
 class ROIDetectionEnv(gym.Env):
     """
-    A Gym environment for ROI detection using reinforcement learning.
+    A Gymnasium environment for ROI detection using reinforcement learning.
     
     The agent's task is to place bounding boxes (ROIs) on an image to cover
     ground truth annotations. The agent can move a candidate ROI, place it, 
@@ -118,13 +118,22 @@ class ROIDetectionEnv(gym.Env):
             )
         })
 
-    def reset(self) -> Dict[str, np.ndarray]:
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """
         Reset the environment with a new image.
         
+        Args:
+            seed: Random seed for reproducibility
+            options: Additional options for reset
+        
         Returns:
-            Dict: The initial observation containing the image and bbox state
+            Tuple containing:
+                - Dict: The initial observation containing the image and bbox state
+                - Dict: Additional info about the reset
         """
+        # Initialize random number generator if seed is provided
+        super().reset(seed=seed)
+        
         # Reset episode timer
         self.start_time = time.time()
         
@@ -179,10 +188,13 @@ class ROIDetectionEnv(gym.Env):
                 self.bbox_size[1]   # Height
             ]
             
-        # Return the initial observation
-        return self._get_observation()
+        # Return the initial observation and info
+        observation = self._get_observation()
+        info = {"reset_successful": True}
+        
+        return observation, info
 
-    def step(self, action_from_agent: int) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
+    def step(self, action_from_agent: int) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """
         Take a step in the environment based on the agent's action.
         
@@ -193,7 +205,8 @@ class ROIDetectionEnv(gym.Env):
             Tuple containing:
                 - observation: Dict with the new state
                 - reward: Float value of the reward
-                - done: Boolean indicating if the episode is finished
+                - terminated: Boolean indicating if the episode ended naturally
+                - truncated: Boolean indicating if the episode was truncated (e.g., time limit)
                 - info: Dict with additional information
         """
         # NEW: Store current position before action
@@ -207,9 +220,10 @@ class ROIDetectionEnv(gym.Env):
         # NEW: Add action to history
         self.action_history.append(action_from_agent)
         
-        # Initialize reward, done flag, and info dictionary
+        # Initialize reward, terminated, truncated flags, and info dictionary
         current_reward_for_action = 0.0
-        done = False
+        terminated = False
+        truncated = False
         info = {}
         metrics = {}
 
@@ -217,14 +231,12 @@ class ROIDetectionEnv(gym.Env):
         elapsed_time = time.time() - self.start_time
 
         if elapsed_time > self.time_limit:
-            # Time limit reached - end episode without executing action
-            done = True
-            info['TimeLimit.truncated'] = True
+            # Time limit reached - truncate episode without executing action
+            truncated = True
             print(f"Time limit ({self.time_limit}s) reached. "
                   f"Agent's action {action_from_agent} was not executed.")
         else:
             # Time limit not reached - proceed with action execution
-            info['TimeLimit.truncated'] = False
 
             # Execute the selected action (ORIGINAL REWARD LOGIC - NO CHANGES)
             if action_from_agent < 4:  # Move bbox (0: Up, 1: Down, 2: Left, 3: Right)
@@ -238,13 +250,13 @@ class ROIDetectionEnv(gym.Env):
                 current_reward_for_action = self._remove_bbox()
                 
             elif action_from_agent == 6:  # End episode
-                done = True
+                terminated = True
 
         # Calculate total reward for this step
         total_step_reward = current_reward_for_action
 
         # Add final reward if episode is ending
-        if done:
+        if terminated or truncated:
             try:
                 final_reward_value, metrics_from_final_reward = self._calculate_final_reward()
                 total_step_reward += final_reward_value
@@ -268,7 +280,7 @@ class ROIDetectionEnv(gym.Env):
             print(f"Error getting observation: {e}")
             observation = self.observation_space.sample()  # Fallback
 
-        return observation, total_step_reward, done, info
+        return observation, total_step_reward, terminated, truncated, info
 
     def render(self, mode: str = 'rgb_array') -> np.ndarray:
         """
@@ -395,8 +407,11 @@ class ROIDetectionEnv(gym.Env):
         """
         features = np.zeros(6, dtype=np.float32)
         
+        # Add small epsilon to prevent dead features
+        epsilon = 0.01
+        
         if len(self.action_history) < 2:
-            return features
+            return features + epsilon
         
         recent_actions = [a for a in list(self.action_history)[-5:] if a != -1]
         
@@ -438,6 +453,7 @@ class ROIDetectionEnv(gym.Env):
                     oscillations += 1
             features[5] = oscillations / max(1, len(recent_actions) - 3)
         
+        features = np.clip(features, epsilon, 1.0)
         return features
 
     # ORIGINAL METHODS - NO CHANGES TO REWARD LOGIC
@@ -604,10 +620,14 @@ class ROIDetectionEnv(gym.Env):
         total_annotations = len(annotations)
         covered_annotations_count = len(self.covered_annotations)
         num_boxes_placed = len(self.bboxes)
+
+        final_reward_val = 0.0
+        if total_annotations>0 and not self.bboxes:
+            final_reward_val = -20.0
         
         # Calculate metrics
         if num_boxes_placed == 0:
-            final_reward_val = - total_annotations  # Penalty for no boxes placed
+            final_reward_val += - total_annotations  # Penalty for no boxes placed
             efficiency_ratio = 0.0
             empty_boxes = 0
             boxes_with_annotations = 0

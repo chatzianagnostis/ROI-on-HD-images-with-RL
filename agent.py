@@ -57,7 +57,15 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
 
         self.bbox_encoder = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(bbox_input_dim, 64),  # 404 -> 64
+            nn.Linear(bbox_input_dim, 256),  # 404 -> 256
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.1),  # Small dropout for regularization
+            nn.Linear(256, 128),  # 256 -> 128
+            nn.LayerNorm(128), 
+            nn.ReLU(),
+            nn.Linear(128, 64),  # 128 -> 64
+            nn.LayerNorm(64),
             nn.ReLU()
         )
         
@@ -80,7 +88,11 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
             position_history_dim = np.prod(observation_space.spaces['position_history'].shape)
             self.position_encoder = nn.Sequential(
                 nn.Flatten(),
-                nn.Linear(position_history_dim, 32),
+                nn.Linear(position_history_dim, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Linear(64, 32),  # Reduce to 32 features
+                nn.LayerNorm(32),
                 nn.ReLU()
             )
             position_features_dim = 32
@@ -91,7 +103,11 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         # ----- NEW: Movement Features Processing -----
         movement_features_dim = observation_space.spaces['movement_features'].shape[0]
         self.movement_encoder = nn.Sequential(
-            nn.Linear(movement_features_dim, 16),
+            nn.Linear(movement_features_dim, 32),
+            nn.LayerNorm(32),
+            nn.ReLU(),
+            nn.Linear(32, 16),  # Reduce to 16 features
+            nn.LayerNorm(16),
             nn.ReLU()
         )
         
@@ -101,10 +117,53 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         total_input_dim = 768 + 64 + 32 + position_features_dim + 16
         
         self.combined_layer = nn.Sequential(
-            nn.Linear(total_input_dim, features_dim),
+            nn.Linear(total_input_dim, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.1)  # Small dropout for regularization
+            nn.Dropout(0.1),  # Small dropout for regularization
+            nn.Linear(512, features_dim),  # Output to features_dim
+            nn.LayerNorm(features_dim),
+            nn.ReLU()
         )
+
+        # CRITICAL: Apply custom initialization to prevent saturation
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Apply custom weight initialization to prevent gradient explosion."""
+        
+        print("Applying FIXED weight initialization...")
+        
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Use smaller initialization for deep layers
+                if module.out_features == 512:  # combined_layer.0
+                    nn.init.xavier_uniform_(module.weight, gain=0.5)  # Smaller gain
+                elif module.out_features == 256:  # combined_layer.4
+                    nn.init.xavier_uniform_(module.weight, gain=0.5)
+                else:
+                    nn.init.xavier_uniform_(module.weight, gain=nn.init.calculate_gain('relu'))
+
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.01)
+            
+            elif isinstance(module, nn.LSTM):
+                for name, param in module.named_parameters():
+                    if 'weight' in name:
+                        nn.init.orthogonal_(param)
+                    elif 'bias' in name:
+                        nn.init.constant_(param, 0.0)
+                        # Set forget gate bias to 1 (LSTM best practice)
+                        with torch.no_grad():  # FIXED: Prevent in-place operation error
+                            n = param.size(0)
+                            param[n//4:n//2].fill_(1.0)
+            
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, 0, 0.1)
+            
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.bias, 0)
+                nn.init.constant_(module.weight, 1)
     
     def preprocess_image(self, image: torch.Tensor) -> torch.Tensor:
         """
@@ -161,6 +220,12 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         # ===== NEW: Process Movement Features =====
         movement_features_raw = observations['movement_features'].float()
         movement_features = self.movement_encoder(movement_features_raw)  # (batch_size, 16)
+
+        # # apply scaling
+        # image_features = image_features * 0.5  # Reduce DINOv2 dominance
+        # bbox_features = bbox_features * 2.0     # Boost bbox importance
+        # action_features = action_features * 2.0  # Boost action importance
+        # movement_features = movement_features * 3.0  # Really boost movement
         
         # ===== Combine All Features =====
         features_to_combine = [
@@ -180,6 +245,10 @@ class ROIFeatureExtractor(BaseFeaturesExtractor):
         
         return final_features
 
+def linear_schedule(initial_value: float):
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
 
 
 class ROIAgent:
@@ -197,7 +266,7 @@ class ROIAgent:
         model_dir: str = "models",
         log_dir: str = "logs",
         tensorboard_log: Optional[str] = None,
-        learning_rate: float = 3e-4
+        learning_rate: float = 1e-4
     ):
         """
         Initialize the ROI Agent.
@@ -232,7 +301,7 @@ class ROIAgent:
             # Core components
             "policy": ActorCriticPolicy,
             "env": env,
-            "learning_rate": learning_rate,
+            "learning_rate": linear_schedule(learning_rate),
             
             # Sample collection parameters
             "n_steps": 512,        
@@ -240,16 +309,18 @@ class ROIAgent:
             
             # Training parameters
             "n_epochs": 10,          
-            "gamma": 0.995,          # Standard discount factor
+            "gamma": 0.995,         # Standard discount factor
             "gae_lambda": 0.95,     # Standard GAE lambda
             "ent_coef": 0.01,       # Increased exploration for richer observation space
-            "clip_range": 0.2,
+            "clip_range": 0.4,
             "vf_coef": 0.5,         # Standard value function coefficient
             "max_grad_norm": 0.5,   # Gradient clipping
+            "normalize_advantage": True ,  # Normalize advantages for stability
             
             # Miscellaneous
             "verbose": 2,
             "tensorboard_log": tensorboard_log,
+            # "device": "cpu",
             
             # Custom feature extractor with action history support
             "policy_kwargs": {
@@ -298,56 +369,31 @@ class ROIAgent:
         print(f"Model loaded from {path}.zip")
         
     def predict(self, observation: Dict[str, np.ndarray], deterministic: bool = True) -> np.ndarray:
-        """
-        Make a prediction with the model.
-        Enhanced to handle action history observations.
+        """Make a prediction with the model."""
         
-        Args:
-            observation: Environment observation (with action history)
-            deterministic: Whether to use deterministic actions (True for evaluation)
-            
-        Returns:
-            np.ndarray: Selected action
-        """
-        # Handle both single observations and batched observations
+        # Get the device of the model
+        device = next(self.model.policy.parameters()).device
+        
         obs_dict = {}
         
-        # Convert image
+        # Convert and move tensors to correct device
         if 'image' in observation:
             if isinstance(observation['image'], np.ndarray):
                 if len(observation['image'].shape) == 3:  # Single image
-                    obs_dict['image'] = torch.tensor(observation['image']).unsqueeze(0).permute(0, 3, 1, 2)
+                    obs_dict['image'] = torch.tensor(observation['image']).unsqueeze(0).permute(0, 3, 1, 2).to(device)
                 else:  # Already batched
-                    obs_dict['image'] = torch.tensor(observation['image']).permute(0, 3, 1, 2)
-            else:
-                obs_dict['image'] = observation['image']
+                    obs_dict['image'] = torch.tensor(observation['image']).permute(0, 3, 1, 2).to(device)
         
-        # Convert bbox states
-        for key in ['bbox_state', 'current_bbox']:
+        # Convert other components and move to device
+        for key in ['bbox_state', 'current_bbox', 'action_history', 'position_history', 'movement_features']:
             if key in observation:
                 if isinstance(observation[key], np.ndarray):
-                    if len(observation[key].shape) == 1 and key == 'current_bbox':  # Single current_bbox
-                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
-                    elif len(observation[key].shape) == 2 and key == 'bbox_state':  # Single bbox_state
-                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
+                    if len(observation[key].shape) == 1 and key in ['current_bbox', 'action_history', 'movement_features']:
+                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0).to(device)
+                    elif len(observation[key].shape) == 2 and key in ['bbox_state', 'position_history']:
+                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0).to(device)
                     else:  # Already batched
-                        obs_dict[key] = torch.tensor(observation[key])
-                else:
-                    obs_dict[key] = observation[key]
-        
-        # Convert action history components
-        for key in ['action_history', 'position_history', 'movement_features']:
-            if key in observation:
-                if isinstance(observation[key], np.ndarray):
-                    if len(observation[key].shape) == 1:  # Single observation
-                        obs_dict[key] = torch.tensor(observation[key]).unsqueeze(0)
-                    else:  # Already batched or 2D
-                        obs_dict[key] = torch.tensor(observation[key])
-                        if len(obs_dict[key].shape) == 2 and key in ['position_history']:
-                            obs_dict[key] = obs_dict[key].unsqueeze(0)  # Add batch dimension
-                else:
-                    obs_dict[key] = observation[key]
+                        obs_dict[key] = torch.tensor(observation[key]).to(device)
         
         action, _states = self.model.predict(obs_dict, deterministic=deterministic)
-        
         return action
